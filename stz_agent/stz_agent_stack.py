@@ -1,19 +1,168 @@
+from pathlib import Path
+
 from aws_cdk import (
-    # Duration,
+    ArnFormat,
+    CfnOutput,
+    Duration,
+    RemovalPolicy,
     Stack,
-    # aws_sqs as sqs,
+    aws_apigatewayv2 as apigwv2,
+    aws_apigatewayv2_integrations as integrations,
+    aws_iam as iam,
+    aws_lambda as lambda_,
+    aws_logs as logs,
+    aws_s3 as s3,
+    aws_secretsmanager as secretsmanager,
+    aws_sqs as sqs,
 )
 from constructs import Construct
 
-class StzAgentStack(Stack):
+ROOT = Path(__file__).resolve().parents[1]
+FUNCTIONS = ("doorman", "prime", "com")
 
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+
+class StzAgentStack(Stack):
+    """Scale-to-zero agent stack (spec §2, §8; protocol §2, §4.2).
+
+    Functions get explicit names and reference each other only by string
+    name/ARN: Prime<->Com and Prime->Prime invokes would otherwise form a
+    CloudFormation dependency cycle.
+    """
+
+    def __init__(self, scope: Construct, construct_id: str, *, api_token: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # The code that defines your stack goes here
+        names = {f: f"{self.stack_name}-{f}" for f in FUNCTIONS}
+        arns = {
+            f: self.format_arn(
+                service="lambda",
+                resource="function",
+                resource_name=n,
+                arn_format=ArnFormat.COLON_RESOURCE_NAME,
+            )
+            for f, n in names.items()
+        }
 
-        # example resource
-        # queue = sqs.Queue(
-        #     self, "StzAgentQueue",
-        #     visibility_timeout=Duration.seconds(300),
-        # )
+        # --- Storage -------------------------------------------------------
+        bucket = s3.Bucket(
+            self,
+            "Bucket",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+        )
+
+        # --- Queues (no event source mappings: functions poll themselves) ---
+        def dlq(name: str) -> sqs.DeadLetterQueue:
+            q = sqs.Queue(self, f"{name}Dlq", retention_period=Duration.days(14))
+            return sqs.DeadLetterQueue(queue=q, max_receive_count=5)
+
+        queues = {
+            "doorman": sqs.Queue(
+                self,
+                "DoormanMessages",
+                visibility_timeout=Duration.seconds(30),
+                retention_period=Duration.seconds(60),
+            ),
+            "prime": sqs.Queue(
+                self,
+                "PrimeMessages",
+                visibility_timeout=Duration.minutes(15),
+                dead_letter_queue=dlq("PrimeMessages"),
+            ),
+            "com": sqs.Queue(
+                self,
+                "ComMessages",
+                visibility_timeout=Duration.seconds(30),
+                dead_letter_queue=dlq("ComMessages"),
+            ),
+        }
+
+        secret = secretsmanager.Secret(
+            self, "ModelKeys", description="Model API keys JSON; set by a person"
+        )
+
+        common_env = {
+            "BUCKET_NAME": bucket.bucket_name,
+            "DOORMAN_QUEUE_URL": queues["doorman"].queue_url,
+            "PRIME_QUEUE_URL": queues["prime"].queue_url,
+            "COM_QUEUE_URL": queues["com"].queue_url,
+            "DOORMAN_FUNCTION_NAME": names["doorman"],
+            "PRIME_FUNCTION_NAME": names["prime"],
+            "COM_FUNCTION_NAME": names["com"],
+        }
+
+        # --- Functions -----------------------------------------------------
+        def make_fn(key: str, memory: int, timeout: Duration, extra_env: dict) -> lambda_.Function:
+            name = names[key]
+            dist = ROOT / "functions" / "dist" / key
+            if not (dist / "index.mjs").exists():
+                raise FileNotFoundError(f"{dist}/index.mjs missing: run scripts/build.sh first")
+            log_group = logs.LogGroup(
+                self,
+                f"{key.capitalize()}Logs",
+                log_group_name=f"/aws/lambda/{name}",
+                retention=logs.RetentionDays.ONE_WEEK,
+                removal_policy=RemovalPolicy.DESTROY,
+            )
+            return lambda_.Function(
+                self,
+                key.capitalize(),
+                function_name=name,
+                runtime=lambda_.Runtime.NODEJS_22_X,
+                architecture=lambda_.Architecture.X86_64,
+                handler="index.handler",
+                code=lambda_.Code.from_asset(str(dist)),
+                memory_size=memory,
+                timeout=timeout,
+                reserved_concurrent_executions=1,
+                log_group=log_group,
+                environment={**common_env, **extra_env},
+            )
+
+        # Doorman: HTTP API integrations cap at 30 s.
+        doorman = make_fn("doorman", 128, Duration.seconds(29), {"API_TOKEN": api_token})
+        prime = make_fn("prime", 2048, Duration.minutes(15), {})
+        com = make_fn("com", 128, Duration.minutes(15), {"MODEL_SECRET_ARN": secret.secret_arn})
+        fns = {"doorman": doorman, "prime": prime, "com": com}
+
+        prime.configure_async_invoke(max_event_age=Duration.seconds(60), retry_attempts=0)
+
+        # --- IAM -----------------------------------------------------------
+        invokes = {"doorman": ["prime"], "prime": ["com", "prime"], "com": ["prime"]}
+        for caller, targets in invokes.items():
+            fns[caller].add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["lambda:InvokeFunction"],
+                    resources=[arns[t] for t in targets],
+                )
+            )
+
+        sends = {"doorman": ["prime"], "prime": ["doorman", "com"], "com": ["prime"]}
+        for key, fn in fns.items():
+            queues[key].grant_consume_messages(fn)
+            for target in sends[key]:
+                queues[target].grant_send_messages(fn)
+
+        bucket.grant_read_write(prime)
+        bucket.grant_read_write(com)
+        bucket.grant_read(doorman)
+        secret.grant_read(com)
+
+        # --- HTTP API ------------------------------------------------------
+        api = apigwv2.HttpApi(self, "Api")
+        integration = integrations.HttpLambdaIntegration("DoormanIntegration", doorman)
+        for method, path in (
+            (apigwv2.HttpMethod.POST, "/messages"),
+            (apigwv2.HttpMethod.POST, "/wake"),
+            (apigwv2.HttpMethod.GET, "/events"),
+        ):
+            api.add_routes(path=path, methods=[method], integration=integration)
+
+        # --- Outputs -------------------------------------------------------
+        CfnOutput(self, "ApiUrl", value=api.api_endpoint)
+        CfnOutput(self, "BucketName", value=bucket.bucket_name)
+        for key in FUNCTIONS:
+            CfnOutput(self, f"{key.capitalize()}FunctionName", value=names[key])
