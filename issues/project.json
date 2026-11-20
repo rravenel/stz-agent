@@ -1,0 +1,10 @@
+{
+  "name": "stz-agent",
+  "url": "https://github.com/rravenel/stz-agent",
+  "grouping": {
+    "field": "Milestone",
+    "pattern": "^(?P<key>[AB](?P<num>\\d+))\\s*[—–-]?\\s*(?P<label>.*)$",
+    "singular": "",
+    "unassigned": "No milestone"
+  }
+}
