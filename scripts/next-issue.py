@@ -4,12 +4,15 @@
 Usage:
   scripts/next-issue.py A            # next issue for Track A (milestones A0, A1, ...)
   scripts/next-issue.py B --list     # every Track B issue with status and blockers
+  scripts/next-issue.py A --owner    # owner issues (Assignee row) that are ready for their person
 
 An issue is workable when its Status is `open`, it has no `## Blocked`
 section, and every issue it names with "Depends on #NNNN" or "Blocked by
 #NNNN" is `resolved` or `closed`. Milestones are drained in order (A0 before
 A1), then by issue number. Prints `NNNN  <milestone>  <title>`; exits 1 with
-nothing on stdout when no issue is workable. Stdlib only.
+nothing on stdout when no issue is workable. Issues with an `Assignee` row
+(owner issues, done by a person) are never picked for agents; `--owner`
+lists the ready ones instead. Stdlib only.
 """
 import pathlib
 import re
@@ -43,6 +46,7 @@ def load():
             "milestone": meta.get("Milestone", ""),
             "deps": sorted(deps - {path.stem}),
             "blocked_section": "\n## Blocked" in text,
+            "assignee": meta.get("Assignee", "").strip(),
         }
     return issues
 
@@ -73,11 +77,18 @@ def main(argv):
             w = waiting(i)
             extra = f"  waits on #{', #'.join(w)}" if w and i["status"] not in DONE else ""
             ms = i["milestone"].split()[0] if i["milestone"] else "-"
-            print(f"{i['id']}  {i['status']:<11} {ms:<4} {i['title']}{extra}")
+            who = f"  [owner: {i['assignee']}]" if i["assignee"] else ""
+            print(f"{i['id']}  {i['status']:<11} {ms:<4} {i['title']}{who}{extra}")
         return 0
 
+    if "--owner" in argv:
+        ready = [i for i in mine if i["assignee"] and i["status"] == "open" and not waiting(i)]
+        for i in ready:
+            print(f"{i['id']}  {i['milestone'].split()[0]}  {i['assignee']}  {i['title']}")
+        return 0 if ready else 1
+
     for i in mine:
-        if i["status"] == "open" and not i["blocked_section"] and not waiting(i):
+        if i["status"] == "open" and not i["blocked_section"] and not i["assignee"] and not waiting(i):
             print(f"{i['id']}  {i['milestone'].split()[0]}  {i['title']}")
             return 0
     return 1
