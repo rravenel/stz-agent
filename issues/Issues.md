@@ -245,7 +245,7 @@ This queue is meant to be worked for hours with nobody at the keyboard. Two rule
 
 **A blocker stops one issue, never the run.** If something needs a human — a permission, a credential, a device, an approval, a project policy — first try to work around it: retry once reading the real error, find another route to the same result, or narrow the scope and ship the part that works (filing the rest as its own linked issue). Only when none of that produces anything shippable, set the issue to `blocked`, write the `## Blocked` section with an exact ask, and hand back. The orchestrator takes the next workable issue immediately and collects every human ask into one report at the end of the run.
 
-**What still stops an agent cold.** Deciding reversible calls doesn't extend to the owner's own calls. Without a direct instruction, never: set `closed` or `wontfix`; push anything other than a reviewed merge to `main` (above); force-push; deploy, publish, or take any other outward-facing action; spend money; delete or rewrite history; edit a document the owner owns (record the proposed amendment in `## Gotchas`); touch a sibling repo; or override a prohibition in this file or `CLAUDE.md`.
+**What still stops an agent cold.** Deciding reversible calls doesn't extend to the owner's own calls. Without a direct instruction, never: set `closed` or `wontfix`; push anything other than a reviewed merge to `main` (above); force-push; deploy, publish, or take any other outward-facing action; spend money; delete or rewrite history; edit a document the owner owns (record the proposed amendment in `## Gotchas`); touch a sibling repo; or override a prohibition in this file or `AGENTS.md`.
 
 <!-- Add this project's own hard stops here — e.g. "no agent launches a
      browser without the owner's say-so for that run". -->
@@ -344,7 +344,7 @@ Any additional context, guesses at root cause, related code locations.
 4. Set status to `open`.
 5. Use today's date for First seen.
 6. Phrase the title as a single declarative sentence describing the bug, not a question or a fix description.
-7. **Plan it (phase 1).** Dispatch a fresh subagent on the **top available model (currently Fable)** to read this guide, `CLAUDE.md`, the new issue, and the relevant code, then write `## Prerequisites` and `## Plan` into `issues/NNNN.md` (after `## Description`). It writes no code and leaves status at `open`. Record the planner's usage in `## Work log`. Skip if the user is jotting a quick note and doesn't want planning yet.
+7. **Plan it (phase 1).** Dispatch a fresh subagent on the **top available model (currently Fable)** to read this guide, `AGENTS.md`, the new issue, and the relevant code, then write `## Prerequisites` and `## Plan` into `issues/NNNN.md` (after `## Description`). It writes no code and leaves status at `open`. Record the planner's usage in `## Work log`. Skip if the user is jotting a quick note and doesn't want planning yet.
 
    Planning is where obstacles get found, because it is the only phase where hitting one is cheap. The planner **probes** each thing the fix will need — the verify command, services, credentials, devices, network, harness approvals, this file's own prohibitions, and any issue this one depends on — by actually running a cheap check, and records the result in `## Prerequisites` with the evidence. A box checked on reasoning rather than a command is worse than an unchecked one, because phase 2 will trust it. Anything unmet gets the literal marker `**Needs owner:**` and the exact command that clears it. The planner also settles every open question the implementer would otherwise have to ask.
 8. **If `issues/` is tracked by git**, commit the new file with message `#NNNN <issue title>` so the issue enters git history with its `open` status — the `## Plan` rides along if it's landed, else commit it separately as `#NNNN Plan`. If ignored, skip.
@@ -365,7 +365,7 @@ Issues move from filed to resolved through a **three-phase pipeline**. Each phas
 | **2. Implementation** | when the issue is worked | **Sonnet** | follows the plan, fixes, builds + verifies, code commit, drafts resolution sections | `in-progress` |
 | **3. Review** | after implementation returns | **Opus** | independently re-verifies the diff, then approves or bounces | `resolved` or `open` |
 
-Agora agents keep a CLI session per room, so they are **not** fresh between issues. That's why every phase still starts by re-reading this guide, `CLAUDE.md` and the issue file, and why each phase is a different agent.
+Agora agents keep a CLI session per room, so they are **not** fresh between issues. That's why every phase still starts by re-reading this guide, `AGENTS.md` and the issue file, and why each phase is a different agent.
 
 ### Orchestrator: pick and dispatch
 
@@ -385,10 +385,10 @@ A subagent starts with fresh context, so its first job is loading the project's 
 
 1. **Orient in the project.** Read, every time, in order:
    - **`issues/Issues.md`** (this file) — status vocabulary, module conventions, build/verify command, commit conventions, project rules. **Authoritative for issue-tracking workflow.**
-   - **`CLAUDE.md`** at the repo root, if it exists — project-wide guidance, code conventions, restricted areas, build/test commands. **Binding.**
+   - **`AGENTS.md`** at the repo root, if it exists — project-wide guidance, code conventions, restricted areas, build/test commands. **Binding.**
    - **`issues/NNNN.md`** — the issue in full, **including its `## Prerequisites` and `## Plan`** and any attachments in `issues/NNNN/`.
 
-   If the two guides disagree, prefer `CLAUDE.md` for code/repo conventions and this file for issue-tracking specifics. Read only this issue and any it explicitly depends on — not the whole tracker.
+   If the two guides disagree, prefer `AGENTS.md` for code/repo conventions and this file for issue-tracking specifics. Read only this issue and any it explicitly depends on — not the whole tracker.
 
 2. **Read `## Prerequisites` before anything else.** The planner already probed the environment. An item marked `**Needs owner:**` is a wall it could not clear; if unmet prerequisites gate only part of the work, implement the part they don't gate.
 3. **Set status to `in-progress`** in the markdown and `claim_task` the Agora task. The markdown flip is committed with your drafted notes in step 9 (see "Working in Agora").
@@ -428,7 +428,7 @@ A subagent starts with fresh context, so its first job is loading the project's 
 
 An independent reviewer is the gate between "code landed" and "issue resolved". It owns the `resolved` transition; the implementation subagent never sets it.
 
-1. **Orient** the same way (this file, `CLAUDE.md`, `issues/NNNN.md` including the `## Plan` and the drafted resolution sections).
+1. **Orient** the same way (this file, `AGENTS.md`, `issues/NNNN.md` including the `## Plan` and the drafted resolution sections).
 2. **Inspect the code commit** — read its diff (`git show <hash>`). Does it actually address the reported bug? Right scope? Any correctness, security, or regression risk?
 3. **Re-run the verification command yourself** and read the output — don't trust the drafted `## Verification`. Confirm tests actually executed and passed (same standard as phase 2, step 4). This independent run is the core of the review.
 4. **Decide:**
