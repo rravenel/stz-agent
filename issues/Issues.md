@@ -69,7 +69,7 @@ A chain like orchestrator → planner → implementer → checker → reviewer �
 
 ### Workspaces and git: main stays on `main`, work happens in worktrees
 
-- Each team keeps **one checkout** of the repo on its runner computer (Track B: `~/Developer/Hackathon/stz-agent`, inside the runner's `--workspace`). **That checkout always stays on `main`, and nobody edits files in it directly.** It's used only for creating worktrees and for merging.
+- Each team keeps **one checkout** of the repo on its runner computer (Track B: `~/Developer/Hackathon/stz-agent`, inside the runner's `--workspace`). **That checkout always stays on `main`, and nobody edits files in it directly, except issue files (below).** It's used for creating worktrees, merging, and issue updates.
 - **Every issue gets a worktree** at `.worktrees/NNNN-short-name` inside that checkout (git-ignored). The planner creates it when it starts the issue, from an up-to-date `main`:
 
   ```sh
@@ -79,10 +79,21 @@ A chain like orchestrator → planner → implementer → checker → reviewer �
   ```
 
   Every later phase (implementer, checker, reviewer) works **only inside that worktree path**, which goes in the task body. All of a team's agents share the repository on one machine, so commits made in the worktree are visible to the next phase at once, with no push in between.
-- **Commit as you go, on the issue branch:**
+- **Issue files change on `main`, pushed at once.** Every edit to `issues/NNNN.md` is made in the main checkout and committed and pushed right away, never on the issue branch: filing, `## Plan`, the status flip to `in-progress`, drafted notes, `resolved`, a bounce to `open`, `blocked`, `closed`. That way both teams (and `next-issue.py`) always see each issue's true status on GitHub `main`, and issue branches carry only code, so they never conflict on issue files. Stage only the issue file:
+
+  ```sh
+  cd ~/Developer/Hackathon/stz-agent            # main checkout, on main
+  git fetch https://github.com/rravenel/stz-agent.git main && git merge --ff-only FETCH_HEAD
+  # edit issues/NNNN.md
+  git add issues/NNNN.md && git commit -m "#NNNN <message>"
+  git push https://github.com/rravenel/stz-agent.git main
+  ```
+
+  If the push is rejected because the other side pushed first, run `git fetch https://github.com/rravenel/stz-agent.git main && git rebase FETCH_HEAD` and push again. Never force-push. Commit messages:
   - planner: `#NNNN Plan`
-  - implementer: the code commit, then `#NNNN Notes: implementation drafted` (status stays `in-progress`)
-  - reviewer: `#NNNN Resolve: <title>` or `#NNNN Review: <reason>`
+  - implementer: `#NNNN Status: in-progress` when it starts, then `#NNNN Notes: implementation drafted` (status stays `in-progress`)
+  - reviewer: `#NNNN Resolve: <title>` or `#NNNN Review: <reason>`, after the merge below
+- **Code commits go on the issue branch** in the worktree, as before.
 - **Merging to `main` (the reviewer, on approve, one merge at a time):**
 
   ```sh
@@ -95,7 +106,7 @@ A chain like orchestrator → planner → implementer → checker → reviewer �
   git worktree remove .worktrees/NNNN-short-name && git branch -d track-b/NNNN-short-name
   ```
 
-  If the push is rejected because the other team pushed first, fetch, rebase, re-check and push again. Never force-push.
+  If the push is rejected because the other team pushed first, fetch, rebase, re-check and push again. Never force-push. Then make the `#NNNN Resolve` commit on `main` and push it (above).
 - **Sandbox notes** (checked in an agent run): `git worktree add`, commit and `git worktree remove` all work inside the workspace. git over SSH is blocked, so fetch and push use the HTTPS URL above, not `origin`. Don't use `push -u` or other commands that write `.git/config`, which is write-protected.
 - The two teams meet only on GitHub `main`. Pull it before starting each issue.
 
@@ -280,9 +291,7 @@ When tracked:
 | User-confirmed close | markdown only | `#NNNN Close` |
 | Won't fix | markdown only | `#NNNN Won't fix` |
 
-**Working-copy-only changes (no commit):**
-
-- Setting status to `in-progress` at the start of work — transient; the resolve commits supersede it. Committing every status flip would create noise.
+**Every status change is committed and pushed to `main` immediately**, including the flip to `in-progress` (`#NNNN Status: in-progress`). With two teams working in parallel, a status that exists only in one checkout is invisible to the other team and to `next-issue.py`. See "Workspaces and git" for the commands.
 
 **Why two commits to resolve, not one:** the **Commit** metadata row records the hash of the code-fix commit, and that hash isn't known until *after* the code commit lands. Splitting resolution into a code commit and a resolution commit keeps each commit single-purpose ("fix the code", "document the fix") and lets the resolution commit reference the hash cleanly.
 
@@ -391,7 +400,7 @@ A subagent starts with fresh context, so its first job is loading the project's 
    If the two guides disagree, prefer `AGENTS.md` for code/repo conventions and this file for issue-tracking specifics. Read only this issue and any it explicitly depends on — not the whole tracker.
 
 2. **Read `## Prerequisites` before anything else.** The planner already probed the environment. An item marked `**Needs owner:**` is a wall it could not clear; if unmet prerequisites gate only part of the work, implement the part they don't gate.
-3. **Set status to `in-progress`** in the markdown and `claim_task` the Agora task. The markdown flip is committed with your drafted notes in step 9 (see "Working in Agora").
+3. **Set status to `in-progress`** in `issues/NNNN.md` on `main`, commit `#NNNN Status: in-progress` and push it at once (see "Workspaces and git"), then `claim_task` the Agora task.
 4. **Make the code changes** required to fix the bug, following the `## Plan`. If you deviate, note why in `## Fix` so the reviewer understands. Decide reversible calls yourself and record them (see "Working unattended"); work around obstacles before giving up.
 5. **Build *and* run the project's verification command, and confirm tests actually executed and passed.** Mandatory; cannot be shortcutted.
 
@@ -422,7 +431,7 @@ A subagent starts with fresh context, so its first job is loading the project's 
      - **`## Files changed`** — one bullet per file, with a short note on what changed.
      - **`## Gotchas`** *(optional)* — surprises, dead ends, non-obvious behavior. Skip if nothing's notable; be specific when present.
 
-9. **Commit the draft** in the worktree as `#NNNN Notes: implementation drafted`. Set the task to `needs_review`, then @mention the reviewer with the branch and commit hash. The reviewer makes the resolution commit in phase 3.
+9. **Commit the draft** on `main` (not in the worktree) as `#NNNN Notes: implementation drafted` and push it. Set the task to `needs_review`, then @mention the reviewer with the branch and commit hash. The reviewer makes the resolution commit in phase 3.
 
 ### Phase 3 — Review subagent (Opus): verify → resolve or bounce
 
@@ -432,8 +441,8 @@ An independent reviewer is the gate between "code landed" and "issue resolved". 
 2. **Inspect the code commit** — read its diff (`git show <hash>`). Does it actually address the reported bug? Right scope? Any correctness, security, or regression risk?
 3. **Re-run the verification command yourself** and read the output — don't trust the drafted `## Verification`. Confirm tests actually executed and passed (same standard as phase 2, step 4). This independent run is the core of the review.
 4. **Decide:**
-   - **Approve** (fix is correct, verification passed): change **Status** to `resolved`; add a `**Closed**` row with today's date; ensure the `**Commit**` row is present; add a top-of-resolution `## Resolution notes` blockquote (`> 🟢 Resolved YYYY-MM-DD — <one sentence>.`). **If `issues/` is tracked**, make the resolution commit — stage `issues/NNNN.md`, message `#NNNN Resolve: <title>`, body noting the code commit hash. If ignored, skip; the markdown is the record.
-   - **Bounce** (verification failed, fix wrong, scope off): revert **Status** to `open`; add a `## Review notes` section stating exactly what failed and what the next implementation pass must fix. Leave the code commit in place unless you say otherwise in the notes. **If tracked**, commit the markdown with `#NNNN Review: <reason>`. Return to the orchestrator, which re-dispatches phase 2.
+   - **Approve** (fix is correct, verification passed): change **Status** to `resolved`; add a `**Closed**` row with today's date; ensure the `**Commit**` row is present; add a top-of-resolution `## Resolution notes` blockquote (`> 🟢 Resolved YYYY-MM-DD — <one sentence>.`). **If `issues/` is tracked**, merge the code branch first, then make the resolution commit on `main` and push it — stage `issues/NNNN.md`, message `#NNNN Resolve: <title>`, body noting the code commit hash. If ignored, skip; the markdown is the record.
+   - **Bounce** (verification failed, fix wrong, scope off): revert **Status** to `open`; add a `## Review notes` section stating exactly what failed and what the next implementation pass must fix. Leave the code commit in place unless you say otherwise in the notes. **If tracked**, commit the markdown on `main` with `#NNNN Review: <reason>` and push it. Return to the orchestrator, which re-dispatches phase 2.
 
 Status flow: `open` (with `## Prerequisites` + `## Plan`) → `in-progress` → review → `resolved`, or bounced back to `open`. Any phase can instead park the issue at `blocked`, which withdraws it from the queue until a human acts. **Never set `closed`** — the user does that after verifying the fix.
 
