@@ -106,9 +106,8 @@ export function makeAck(msg: Envelope, opts: Omit<MakeOptions, "corr_id"> = {}):
 
 function defaultCorrId(type: MessageType, body: unknown): string | undefined {
   if (!isRecord(body)) return undefined;
-  if (type === "http.request" || type === "http.response") return body["request_id"] as string;
-  if (type === "ack") return body["acked_msg_id"] as string;
-  return undefined;
+  const v = type === "http.request" || type === "http.response" ? body["request_id"] : type === "ack" ? body["acked_msg_id"] : undefined;
+  return typeof v === "string" ? v : undefined;
 }
 
 export type ParseResult = { ok: true; value: Envelope } | { ok: false; error: string };

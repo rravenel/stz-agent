@@ -77,3 +77,42 @@ test("finalPoll reports whether anything arrived during the grace period", async
   setTimeout(() => com.send("prime", "http.response", { request_id: "r1", ok: true, elapsed_ms: 3 }), 5);
   assert.equal(await poll, false);
 });
+
+test("a consumer that deletes on accept still receives every queued message (Com, protocol §6)", async () => {
+  const bus = new InMemoryBus();
+  const prime = bus.connect("prime");
+  prime.onMessage(() => {});
+  for (const id of ["a", "b", "c"]) {
+    prime.send("com", "http.request", {
+      request_id: id, method: "GET", url: `mock://${id}`, headers: {}, auth: "none", timeout_s: 5, purpose: "repl",
+    });
+  }
+  await tick(); // com is asleep: all three wait in its queue
+  const com = bus.connect("com");
+  const seen: string[] = [];
+  com.onMessage((d) => {
+    if (d.msg.type === "http.request") seen.push(d.msg.body.request_id);
+    void com.deleteMessage(d.receipt); // synchronous delete inside the handler
+  });
+  await tick();
+  await tick();
+  assert.deepEqual(seen, ["a", "b", "c"]);
+  assert.deepEqual(bus.pending("com"), []);
+  assert.equal(prime.unackedCount(), 0, "all three acks processed");
+});
+
+test("acks queued back to back are all processed in one pass", async () => {
+  const bus = new InMemoryBus();
+  const doorman = bus.connect("doorman"); // no handler yet: acks to it wait in its queue
+  doorman.send("prime", "user.message", { text: "1" });
+  doorman.send("prime", "user.message", { text: "2" });
+  const prime = bus.connect("prime");
+  prime.onMessage(() => {});
+  await tick();
+  assert.equal(bus.pending("doorman").length, 2, "two acks queued back to back");
+  assert.equal(doorman.unackedCount(), 2);
+  doorman.onMessage(() => {}); // one kick drains the queue
+  await Promise.resolve();
+  assert.equal(doorman.unackedCount(), 0, "both acks processed in the same pass");
+  assert.deepEqual(bus.pending("doorman"), []);
+});

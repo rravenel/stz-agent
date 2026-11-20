@@ -87,8 +87,12 @@ export class InMemoryBus {
   kick(endpoint: Endpoint): void {
     const c = this.live.get(endpoint);
     if (!c?.ready()) return;
-    for (const q of this.queue(endpoint)) {
-      if (q.inFlight) continue;
+    // Walk a copy: receive() and handlers delete entries (acks, Com's
+    // delete-on-accept) from the live array, which would skip the next one.
+    const live = this.queue(endpoint);
+    for (const q of [...live]) {
+      if (q.inFlight || !live.includes(q)) continue;
+      if (!c.ready()) return; // a handler may have stopped this consumer
       q.inFlight = true;
       c.receive(q);
     }
