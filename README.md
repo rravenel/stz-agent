@@ -40,7 +40,7 @@ scripts/deploy.sh                   # deploys your own stack, StzAgent-<your use
 
 `scripts/deploy.sh` uses the pinned CDK CLI and the venv's Python. If you run `cdk` by hand, use `functions/node_modules/.bin/cdk` with the venv activated.
 
-Each developer gets their own stack, named from your OS username. Override the name with `-c env=<name>`. For example, the shared demo stack is deployed with `scripts/deploy.sh demo --yes`.
+Each developer gets their own stack, named from your OS username. Override the name with `scripts/deploy.sh <name>` (or `-c env=<name>` on a raw `cdk` command). For example, the shared demo stack is deployed with `scripts/deploy.sh demo --yes`.
 
 `cdk` uses the `stz-dev` profile from `cdk.json`. Plain `aws` commands need `--profile stz-dev`, or `export AWS_PROFILE=stz-dev` in your shell.
 
