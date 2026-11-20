@@ -1,0 +1,32 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+stz-agent is a "Scale to Zero" cloud agent architecture. Infrastructure is defined with the AWS CDK in Python (Python 3.12, `aws-cdk-lib` v2) and deploys to `us-west-2`. The stack is still the CDK scaffold, and no resources are defined yet.
+
+## Commands
+
+Always activate the venv first: `source .venv/bin/activate`. Dependencies are in `requirements.txt` (CDK libs) and `requirements-dev.txt` (pytest).
+
+- `pytest`: run all unit tests
+- `pytest tests/unit/test_stz_agent_stack.py::test_sqs_queue_created`: run a single test
+- `cdk synth`: synthesize CloudFormation, which runs `python3 app.py` (fast way to check the app builds)
+- `cdk diff`, `cdk deploy`, `cdk destroy`: compare, deploy, or delete *your own* stack
+- `aws sso login --profile stz-dev`: refresh credentials when the 8-hour SSO session expires
+
+`cdk.json` sets `"profile": "stz-dev"`, so `cdk` commands use it automatically. Plain `aws` commands need `--profile stz-dev` or `AWS_PROFILE=stz-dev`. The account is already CDK-bootstrapped, so don't run `cdk bootstrap`.
+
+## Architecture
+
+- `app.py` is the CDK entry point. It creates exactly one `StzAgentStack`, named `StzAgent-<env>`. `env` comes from CDK context (`-c env=<name>`) and defaults to the OS username (`getpass.getuser()`), so each developer deploys an isolated copy. It must match `[a-zA-Z][a-zA-Z0-9-]{0,30}`. The shared demo stack is `-c env=demo`.
+- The stack's account and region come from `CDK_DEFAULT_ACCOUNT`/`CDK_DEFAULT_REGION`, which the CLI fills in from the active profile. Nothing is hardcoded.
+- Every stack is tagged `project=stz-agent` and `env=<env>`.
+- `stz_agent/stz_agent_stack.py` (`StzAgentStack`) is where resources go.
+- Tests in `tests/unit/` synthesize the stack with `aws_cdk.assertions.Template.from_stack` and assert on resource properties. The existing test is a placeholder that makes no assertions yet.
+
+## Cautions
+
+- `cdk deploy`/`cdk destroy` without `-c env=...` target the stack for the current OS user. Passing `-c env=demo` targets the shared demo stack, so confirm before deploying or destroying it.
+- AWS SSO: Identity Center is in `us-east-2`, but resources live in `us-west-2`.
