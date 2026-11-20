@@ -133,13 +133,13 @@ s3://<bucket>/
 ### 5.2 REPL (QuickJS in WASM)
 
 - **One tool**: `repl(code) → {value, stdout, stderr, error}`. The model writes scripts for file I/O, HTTP, and parsing.
-- **Runtime**: QuickJS compiled to WASM, running on Prime's **main thread**. SQS traffic is on the comms worker, so a long eval doesn't block acks. REPL state lives in WASM linear memory, and a snapshot of that memory (plus mutable globals and table) is the REPL's persisted state. **[RISK: spike S1.]**
+- **Runtime**: QuickJS compiled to WASM, running on Prime's **main thread**. SQS traffic is on the comms worker, so a long eval doesn't block acks. REPL state lives in WASM linear memory, and a snapshot of that memory (plus mutable globals and table) is the REPL's persisted state. **Spike S1 passed (local Node):** quickjs-ng's WASI reactor build (`qjs-wasi-reactor.wasm`, v0.18.0); the snapshot is the gzipped linear memory (~120 KB) plus the runtime and context addresses; the mutable stack-pointer global needs no saving between host calls. See `spikes/s1-quickjs/README.md`. **[Lambda run pending.]**
 - **Never use an Asyncify build.** All host↔REPL async goes through JS promises, so the WASM call stack is always empty between host calls. That's what makes snapshots consistent.
 - **No host-side handles across a checkpoint.** Any state the host needs to find again lives in JS globals inside the snapshot:
   - `globalThis.__pending[request_id]` holds `{resolve, reject}` for in-flight fetches.
   - `globalThis.__evals[tool_call_id]` holds `{status, value, error}` for evals that haven't settled.
   - The host *reads* these after running pending jobs.
-- **Host functions** (`__host_fetch`, `__host_log`, fs bindings) must be registered **in the same order on every boot**, so references inside the snapshot stay valid. **[RISK: verify in spike S1.]**
+- **Host functions** (`__host_fetch`, `__host_log`, fs bindings) must be registered **in the same order on every boot**, so references inside the snapshot stay valid. **Verified in spike S1:** host functions are wasm-table trampolines appended in a fixed order; restore refuses a different order.
 - **Eval**: each eval is wrapped as `__evals[id] = {status:"pending"}; (async () => { <code> })().then(...)`, which writes its result into `__evals[id]`. The host then runs pending jobs to quiescence.
   - If the eval settles, log `tool.result` and continue the turn.
   - If it is still pending, it can only be waiting on `__pending` fetches, because no timers exist. The tool call stays open and the model turn waits. **This is the scale-to-zero case.**
