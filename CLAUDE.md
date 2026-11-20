@@ -48,5 +48,5 @@ Work is tracked as markdown issues in `issues/`, split into two tracks so two te
 
 - The repo is `rravenel/stz-agent` (remote `origin`, over SSH), and the default branch is `main`. Use the `gh` CLI for issues and PRs. It's already authenticated.
 - Reading GitHub (listing or viewing issues, PRs, diffs, checks) is fine anytime.
-- Ask before anything that posts or changes GitHub: opening, editing, commenting on, labeling, closing, or merging issues and PRs, and `git push`. Show what will be posted first.
-- Never push directly to `main`. Work on a branch and open a PR.
+- Ask before anything that posts or changes GitHub issues or PRs: opening, editing, commenting on, labeling, closing or merging them. Show what will be posted first.
+- The main checkout stays on `main`. Each issue is worked on its own branch in a git worktree (`.worktrees/NNNN-short-name`). Only a change that has passed review is merged to `main` and pushed, by the reviewer, following `issues/Issues.md` ("Workspaces and git"). No other pushes, and never force-push.

@@ -9,7 +9,7 @@ Instructions for coding agents (Codex, OpenCode, Claude Code and others) working
 - **Work tracking:** issues live in `issues/`. Read `issues/Issues.md` before you pick anything up. It defines the two tracks (A: infra and plumbing, B: the Prime harness), which paths each track owns, and the plan → implement → review workflow. Pick work with `scripts/next-issue.py A|B`, and edit only the paths your track owns.
 - **Build and test only through `scripts/`.** Use `scripts/check.sh` to verify (it must end with `CHECK OK`), and `scripts/test.sh [py|ts]` while iterating. Don't run `pytest`, `npm test`, `tsc` or `cdk` directly: the scripts print only failures, and full logs go to `.logs/`.
 - **People-only steps:** `scripts/setup.sh` (installing dependencies) and anything that needs AWS (`scripts/deploy.sh`, the spikes, the demo). Agents have no AWS credentials, so mark these steps **Needs owner:** in the issue.
-- **Git:** one branch per issue (`track-a/NNNN-…` or `track-b/NNNN-…`). Never push to `main`. Ask before pushing or posting anything to GitHub.
+- **Git:** the main checkout stays on `main`. Work each issue in its own worktree and branch (`.worktrees/NNNN-…`, `track-a/NNNN-…` or `track-b/NNNN-…`). Only a reviewed change is merged to `main` and pushed. Never force-push.
 - **Shared demo stack:** never deploy or destroy `-c env=demo` without explicit confirmation.
 
 <!-- Stub: extend as the project grows. Keep CLAUDE.md authoritative. -->

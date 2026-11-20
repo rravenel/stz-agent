@@ -17,7 +17,7 @@ A0 is the exception: Elliot (@offwhite's agent) builds it, Track B reviews it, a
 - **`A0` is the only shared milestone.** It defines the contracts both tracks code against (`functions/shared/envelope.ts`, S3 keys, `state.json` types, the comms-worker interface and its in-memory fake). Track A builds it in the first ~20 minutes; Track B reviews it. After `A0` lands, a change to `functions/shared/` that Track B depends on needs a note on the Track B issue it affects.
 - **Track B never edits Track A's paths, and vice versa.** If you need something there (a dependency, an env var on the Prime function, a stack output), file an issue in the other track's next milestone, reference it with "Depends on #NNNN", and work around it with the fake until it lands.
 - **npm dependencies:** Track B adds its packages to `functions/prime/package.json` only. On a `functions/package-lock.json` conflict, take the other side's lockfile and re-run `scripts/setup.sh`; never hand-merge a lockfile.
-- **Branches:** one branch per issue, `track-a/NNNN-short-name` or `track-b/NNNN-short-name`. Agents push these branches; a person merges them to `main` by PR. Nobody pushes to `main` directly.
+- **Branches and worktrees:** each issue is worked on its own branch, `track-a/NNNN-short-name` or `track-b/NNNN-short-name`, in its own **git worktree**. The main checkout always stays on `main`. Only a change that has passed review is merged to `main` and pushed (see "Workspaces and git").
 - **Cross-track dependencies** are written in prose as `Depends on #NNNN`, which both listing scripts read.
 
 ## Working in Agora (how the workflow runs here)
@@ -42,7 +42,7 @@ Keep phase traffic in the track rooms. Each runner keeps a CLI session per agent
 | **Planner** | Fable (`claude-fable-5-2`) | phase 1: probes prerequisites, writes `## Prerequisites` + `## Plan`. No code | new agent |
 | **Implementer** | Sonnet (`claude-sonnet-5-5`) | phase 2 | new agent |
 | **Reviewer** | Opus (`claude-opus-5-5`) | phase 3 | Elliot |
-| **Checker** | Haiku (`claude-haiku-5-5`) | runs a named script on a named branch in its own clone and replies with the stdout verbatim, nothing else | Joey |
+| **Checker** | Haiku (`claude-haiku-5-5`) | runs a named script in a named worktree and replies with the stdout verbatim, nothing else | Joey |
 
 Implementer and reviewer must be **different agents**: the review is the independent check. All of a team's agents have `workspace` access, and their `mention_policy` is `owner` (only their own person and that person's agents can wake them) unless a room needs otherwise.
 
@@ -61,38 +61,50 @@ Implementer and reviewer must be **different agents**: the review is the indepen
 | `resolved` | `done`, with the resolve commit in the note | reviewer |
 | bounced to `open` | `open`, with the review notes | reviewer |
 | `blocked` | `blocked`, with the exact ask, @mentioning the person | any phase |
-| `closed` | (already `done`) | the person, after merging the PR |
+| `closed` | (already `done`) | the person, after checking the merge on `main` |
 
 ### Hops: let a chain run
 
 A chain like orchestrator → planner → implementer → checker → reviewer → orchestrator is 5–6 agent hops. Agora holds an agent's mention past the room's hop limit (default 3) and flags it `needs_human`. **Each room owner sets `agent_hops` to 8** for `#track-a` and `#track-b` (`PATCH /api/v1/rooms/{room}` or the room settings). A held message isn't lost: a person posting in the thread lets it continue. Agora also pauses agents that go in circles; a second bounce on the same issue is parked as `blocked` anyway.
 
-### Workspaces and git: one clone per agent, exchange through GitHub
+### Workspaces and git: main stays on `main`, work happens in worktrees
 
-- Agents on one runner share its `--workspace`. Two agents switching branches in the same checkout corrupt each other's work, and `git worktree` doesn't help, because the worktree's `.git` points outside the agent's sandbox. So **each agent gets its own clone**:
+- Each team keeps **one checkout** of the repo on its runner computer (Track B: `~/Developer/Hackathon/stz-agent`, inside the runner's `--workspace`). **That checkout always stays on `main`, and nobody edits files in it directly.** It's used only for creating worktrees and for merging.
+- **Every issue gets a worktree** at `.worktrees/NNNN-short-name` inside that checkout (git-ignored). The planner creates it when it starts the issue, from an up-to-date `main`:
 
   ```sh
-  # once per agent (example for Track B)
-  git clone https://github.com/rravenel/stz-agent ~/Developer/Hackathon/agents/<agent>/stz-agent
-  # runner: one --workspace-for per agent, then restart it
-  kolo runner --profile agora --workspace ~/Developer \
-    --workspace-for <agent>=~/Developer/Hackathon/agents/<agent>/stz-agent  ...
+  cd ~/Developer/Hackathon/stz-agent            # the main checkout
+  git fetch https://github.com/rravenel/stz-agent.git main && git merge --ff-only FETCH_HEAD
+  git worktree add -b track-b/NNNN-short-name .worktrees/NNNN-short-name main
   ```
 
-- Work moves between agents **through GitHub**. Agents fetch over HTTPS (git over SSH is blocked in the sandbox) and push **only their issue branch**. The next agent fetches that branch. Before starting, every phase runs `git fetch origin && git switch <branch> && git pull --ff-only` (or creates the branch from `origin/main`).
-- Because the next phase runs in another clone, **every phase commits and pushes its issue-markdown changes**. This differs from the skill, which keeps drafts uncommitted:
+  Every later phase (implementer, checker, reviewer) works **only inside that worktree path**, which goes in the task body. All of a team's agents share the repository on one machine, so commits made in the worktree are visible to the next phase at once, with no push in between.
+- **Commit as you go, on the issue branch:**
   - planner: `#NNNN Plan`
   - implementer: the code commit, then `#NNNN Notes: implementation drafted` (status stays `in-progress`)
   - reviewer: `#NNNN Resolve: <title>` or `#NNNN Review: <reason>`
-  - The `in-progress` flip rides along with the implementer's drafted notes.
-- `issues/*.md` on `main` changes only when a PR merges, so the **live status is the Agora task**. Run `scripts/next-issue.py` on `origin/main` with the open PR branches in mind.
+- **Merging to `main` (the reviewer, on approve, one merge at a time):**
+
+  ```sh
+  cd ~/Developer/Hackathon/stz-agent            # main checkout, on main
+  git fetch https://github.com/rravenel/stz-agent.git main && git merge --ff-only FETCH_HEAD
+  git -C .worktrees/NNNN-short-name rebase main # bring the branch up to date
+  # re-verify after the rebase: scripts/check.sh in the worktree must end CHECK OK
+  git merge --ff-only track-b/NNNN-short-name
+  git push https://github.com/rravenel/stz-agent.git main
+  git worktree remove .worktrees/NNNN-short-name && git branch -d track-b/NNNN-short-name
+  ```
+
+  If the push is rejected because the other team pushed first, fetch, rebase, re-check and push again. Never force-push.
+- **Sandbox notes** (checked in an agent run): `git worktree add`, commit and `git worktree remove` all work inside the workspace. git over SSH is blocked, so fetch and push use the HTTPS URL above, not `origin`. Don't use `push -u` or other commands that write `.git/config`, which is write-protected.
+- The two teams meet only on GitHub `main`. Pull it before starting each issue.
 
 ### What only people do
 
 - Run `scripts/setup.sh` after any dependency change. Agent sandboxes can't install packages: pip's temporary `cacert.pem` is denied, and package registries are unreachable.
 - Anything needing AWS: `scripts/deploy.sh`, the spikes, integration and the demo.
-- Merge PRs to `main`, and move issues to `closed` or `wontfix`.
-- Set up agents, rooms, `agent_hops` and the runner's `--workspace-for` clones.
+- Move issues to `closed` or `wontfix` (after checking the merged change on `main`).
+- Set up agents, rooms and `agent_hops`, and keep the team's main checkout on `main`.
 
 An agent that hits one of these sets the issue and task to `blocked`, writes the exact ask, and @mentions its person (@rene or @offwhite).
 
@@ -114,7 +126,7 @@ All building and testing goes through `scripts/`. Never call `pytest`, `npm test
 | `scripts/next-issue.py A\|B [--list]` | next workable issue for a track | no |
 | `scripts/list-issues.py` | overall status view (from the issues skill) | no |
 
-**Who runs the scripts.** The scripts are quiet by design: one line per step, errors only. So the **implementer** runs `scripts/check.sh` itself while working. The **verification of record** for review is a run by the team's **Checker** (Haiku), in its own clean clone: the reviewer @mentions it with *"Run `scripts/check.sh` on `<branch>` at `<commit>` and reply with its stdout verbatim and nothing else."* The checker replies in the thread, which wakes the reviewer again. If a step fails, the reviewer decides whether to ask for `.logs/<step>.log` (by `grep`/`tail`, never whole).
+**Who runs the scripts.** The scripts are quiet by design: one line per step, errors only. So the **implementer** runs `scripts/check.sh` in the issue's worktree while working. The **verification of record** for review is a run by the team's **Checker** (Haiku): the reviewer @mentions it with *"Run `scripts/check.sh` in `.worktrees/NNNN-short-name` at `<commit>` and reply with its stdout verbatim and nothing else."* The checker replies in the thread, which wakes the reviewer again. If a step fails, the reviewer decides whether to ask for `.logs/<step>.log` (by `grep`/`tail`, never whole). `.logs/` is per worktree.
 
 **TS package contract.** Every TS package (`functions/`, `client/`) defines npm scripts `typecheck` (`tsc --noEmit`), `build` (esbuild bundles into `dist/`) and `test` (`node --test` on `*.test.ts`; Node runs TypeScript directly, so tests need no installed packages). The scripts above pick them up automatically; nothing else needs wiring.
 
@@ -232,7 +244,7 @@ This queue is meant to be worked for hours with nobody at the keyboard. Two rule
 
 **A blocker stops one issue, never the run.** If something needs a human — a permission, a credential, a device, an approval, a project policy — first try to work around it: retry once reading the real error, find another route to the same result, or narrow the scope and ship the part that works (filing the rest as its own linked issue). Only when none of that produces anything shippable, set the issue to `blocked`, write the `## Blocked` section with an exact ask, and hand back. The orchestrator takes the next workable issue immediately and collects every human ask into one report at the end of the run.
 
-**What still stops an agent cold.** Deciding reversible calls doesn't extend to the owner's own calls. Without a direct instruction, never: set `closed` or `wontfix`; push anything but your own issue branch, merge to `main`, deploy, publish, or take any other outward-facing action; spend money; delete or rewrite history; edit a document the owner owns (record the proposed amendment in `## Gotchas`); touch a sibling repo; or override a prohibition in this file or `CLAUDE.md`.
+**What still stops an agent cold.** Deciding reversible calls doesn't extend to the owner's own calls. Without a direct instruction, never: set `closed` or `wontfix`; push anything other than a reviewed merge to `main` (above); force-push; deploy, publish, or take any other outward-facing action; spend money; delete or rewrite history; edit a document the owner owns (record the proposed amendment in `## Gotchas`); touch a sibling repo; or override a prohibition in this file or `CLAUDE.md`.
 
 <!-- Add this project's own hard stops here — e.g. "no agent launches a
      browser without the owner's say-so for that run". -->
@@ -409,7 +421,7 @@ A subagent starts with fresh context, so its first job is loading the project's 
      - **`## Files changed`** — one bullet per file, with a short note on what changed.
      - **`## Gotchas`** *(optional)* — surprises, dead ends, non-obvious behavior. Skip if nothing's notable; be specific when present.
 
-9. **Commit and push the draft** as `#NNNN Notes: implementation drafted`, so the reviewer's clone can fetch it. Set the task to `needs_review`, then @mention the reviewer with the branch and commit hash. The reviewer makes the resolution commit in phase 3.
+9. **Commit the draft** in the worktree as `#NNNN Notes: implementation drafted`. Set the task to `needs_review`, then @mention the reviewer with the branch and commit hash. The reviewer makes the resolution commit in phase 3.
 
 ### Phase 3 — Review subagent (Opus): verify → resolve or bounce
 

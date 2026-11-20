@@ -15,3 +15,6 @@ cdk.out
 node_modules/
 functions/dist/
 client/dist/
+
+# Issue worktrees (see issues/Issues.md)
+.worktrees/
