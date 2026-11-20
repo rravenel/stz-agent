@@ -1,62 +1,46 @@
-# stz-agent: Handoff Protocol (draft v1)
+# stz-agent: Handoff Protocol (draft v2)
 
 > Companion to [spec.md](spec.md). Values marked **[TBD]** are starting points to tune.
 
-## 1. Problem
+## 1. Problem and principle
 
-Prime and Com each exit when idle. A sender must never leave a message in a queue that no live process will read. The hard case is a race: the recipient decides to exit at the same moment the sender enqueues a message.
+Prime and Com each exit when idle, and Prime exits **while its HTTP requests are still in flight**. That is the point of the system. A sender must therefore never leave a message in a queue that no live process will read. The hard case is a race: the recipient decides to exit just as a message arrives.
 
-A one-time "are you awake?" ping/pong doesn't fix this, because the recipient can answer the ping and then exit. Instead we use a **per-message positive handoff**: the sender stays responsible for *each* message until the recipient acks *that* message.
+**Principle: per-message positive handoff.** A sender stays responsible for *each* message until the recipient acks *that* message. Senders don't track whether the recipient is awake. A missing ack is the only signal, and the response to it is always the same: wake the recipient and keep waiting.
 
-The second problem is **stale wakes**. A wake that fires right after the recipient decided to sleep restarts it for nothing. We want wakes to be rare, short-lived, and cheap when they misfire.
+## 2. Channels
 
-## 2. Wake mechanism: async invoke, not an SQS trigger
-
-**Decision (v0): a wake is an async Lambda invoke** (`InvocationType: "Event"`) of the target function, with a small payload `{reason, for_msg_id?}`.
-
-Why not a wake queue with an event source mapping (ESM)?
-
-- With reserved concurrency 1, a wake sent while the target is running gets **throttled** and returned to the queue. It comes back only after the queue's **visibility timeout**, which Lambda requires to be **≥ the function timeout**, so up to about 15 min later. The result is a stale wake long after the target went to sleep, or a real wake delayed by minutes.
-- A running instance can't reliably clear accumulated wakes, because the ESM's pollers are constantly receiving from that queue. (This was your concern.)
-- An ESM also can't be held to one concurrent invocation: its `MaximumConcurrency` minimum is 2.
-
-Async invoke behaviour with reserved concurrency 1:
-
-- If the target is running, the invoke is throttled, and **Lambda retries it internally** with backoff (about 1 s, growing to at most 5 min).
-- We set **`MaximumEventAgeInSeconds = 60`** **[TBD]** (the minimum allowed) on the function's event-invoke config, so a wake that can't land within 60 s is **discarded**. Wakes can't pile up.
-- We set **`MaximumRetryAttempts = 0`**. That covers function *errors*, not throttles: a wake handler that crashed shouldn't be replayed.
-- Wakes carry no data the target depends on. On startup the target always drains its inbox, and the inbox is the source of truth.
-
-Stale wakes can still happen. A wake sent to a busy instance retries until that instance exits, then lands on an empty inbox. Two defences:
-
-1. Senders wake **only when an ack doesn't arrive** (§5), so wakes are rare while the target is awake and responsive.
-2. The wake handler's first step is a cheap inbox check (spec §5.1). If the inbox is empty, it returns in about 1 s without loading the REPL.
-
-**[TBD — verify in the infra hour]:** throttled-retry timing in practice, and that a 60 s max event age is enough for a sender's wake to land after a slow Prime exit (checkpoint time).
-
-## 3. Queues and envelope
-
-| Queue | Consumer | Carries |
+| Lambda | Message queue | Woken by |
 |---|---|---|
-| `prime-inbox` | running Prime (background long-poll) | `user.message`, `http.response`, `ack` |
-| `com-inbox` | running Com (long-poll) | `http.request`, `ack` |
+| Doorman | `doorman-messages` (acks only) | API Gateway (sync) |
+| Prime | `prime-messages` | sync wake from Doorman or Com; async self-wake |
+| Com | `com-messages` | sync wake from Prime |
 
-- **Standard** queues, with no Lambda trigger. Delivery is at-least-once and unordered, so every handler is idempotent by `msg_id`.
-- Long polling: `WaitTimeSeconds` 1–5 s inside work loops, up to 20 s when only waiting.
-- Visibility timeout 30 s **[TBD]**. A message received but not deleted, for example because the receiver crashed, reappears after this long.
-- DLQ with `maxReceiveCount` 5.
-- Doorman doesn't have an inbox. Its acks come back through S3 markers (§5).
+- There is **one message queue per Lambda** and **no wake queues**. Message queues have no Lambda trigger. The running instance polls its own queue.
+- All three Lambdas have **reserved concurrency 1**.
+- Queues are **standard** SQS. Delivery is at-least-once, so every handler dedupes by `msg_id`.
+- Use long polling, with `WaitTimeSeconds` 1–5 s.
 
-Envelope (the SQS message body):
+| Queue | Visibility timeout | Why |
+|---|---|---|
+| `prime-messages` | 15 min | Prime holds received messages until its next checkpoint (§6) |
+| `com-messages` | 30 s | Com deletes requests on accept |
+| `doorman-messages` | 30 s, retention 60 s (the minimum) | Acks are only useful for one request's lifetime |
+
+`prime-messages` and `com-messages` each have a DLQ with `maxReceiveCount` 5.
+
+## 3. Envelope
+
+Every SQS message body has this shape:
 
 ```json
 {
   "v": 1,
-  "msg_id": "uuid",                 // unique per logical message
+  "msg_id": "uuid",                // unique per logical message. For user.message, generated by the CLIENT
   "type": "user.message | http.request | http.response | ack",
   "from": "doorman | prime | com",
-  "to": "prime | com",
-  "corr_id": "…",                   // request_id for http.*; acked msg_id for ack
+  "to": "doorman | prime | com",
+  "corr_id": "…",                  // request_id for http.*; acked msg_id for ack
   "sent_at": "ISO-8601",
   "body": { }
 }
@@ -67,80 +51,168 @@ Envelope (the SQS message body):
 - `http.response`: `{request_id, ok, status?, headers?, body_ref?, bytes?, elapsed_ms, error?}`
 - `ack`: `{acked_msg_id}`
 
-## 4. Recipient rules
+Bodies always go in S3. SQS messages carry IDs and S3 keys only.
 
-For each message received from your inbox:
+## 4. Waking a Lambda
 
-1. **Dedupe.** If `msg_id` was already handled (Prime: present in the log; Com: in its in-flight table or recent-done set), go to step 3.
-2. **Take ownership.** Prime appends the message to the log. Com registers the request and starts it.
-3. **Ack.** To Prime or Com: send `ack` to the sender's inbox. To Doorman: write the S3 marker `acks/<msg_id>`.
-4. **Delete** the SQS message.
+### 4.1 Sync wake (Doorman → Prime, Prime → Com, Com → Prime)
 
-Order matters: **persist → ack → delete**. A crash at any point leads to redelivery, then dedupe, then a re-ack.
+A sync wake is a `lambda:Invoke` call with `InvocationType: "RequestResponse"` and payload `{reason: "wake"}`. How it behaves:
 
-`ack` messages don't get acked themselves; the recipient just deletes them.
+- **The Invoke call is an HTTPS request to the Lambda service.** Lambda checks concurrency *before* running anything. If the target is already at its limit of 1, Lambda rejects the call immediately with a **429**. Nothing is queued and nothing is retried. A wake to a running instance therefore can't pile up or fire later.
+- **Otherwise, Lambda runs the target**: a cold init if needed, then the handler. Lambda **sends the response only when the handler returns**. Prime's handler is its whole run (restore, drain messages, agent loop, checkpoint), so that can be minutes. Startup (loading the harness and compiling the WASM) is only the first part of it.
+- **We don't wait for that.** The caller sets its own client-side timeout of `WAKE_CALL_TIMEOUT` (2 s **[TBD]**) on the call: an `abortSignal` on the SDK v3 `send()`, with `maxAttempts: 1` so the SDK doesn't retry 429s on its own. When the timeout fires, our side closes the connection. **This is something we implement, not something Lambda does.** Lambda doesn't cancel an invocation when the caller disconnects, so the target keeps running. **[VERIFY in spike S2.]**
 
-Prime runs its inbox poller as a **background task**, so it acks while the agent loop is busy. A long, synchronous REPL eval can delay acks. That causes a spurious wake (bounded and cheap, §2), not a lost message.
+**The Invoke result is for logging only. It never confirms anything.**
 
-## 5. Sender rules (the handoff)
+| Result within `WAKE_CALL_TIMEOUT` | Meaning | Logged as |
+|---|---|---|
+| 429 with reason `ReservedFunctionConcurrentInvocationLimitExceeded` | An instance is running. It might be about to exit. | `wake: running` |
+| Our timeout fires | Lambda accepted the call. It's probably starting or running. | `wake: started` |
+| Fast error (e.g., `FunctionError`, init crash) | The target failed to start | `wake: failed` + error |
+| Other error (IAM, network) | Misconfiguration or transient | `wake: error` + error |
+
+What happens if startup fails after our timeout has fired? We can't tell from the Invoke result. **The only thing we trust is the ack.** That's why the wake runs inside the ack loop (§5): if no ack arrives, we wake again.
+
+### 4.2 Async self-wake (Prime → Prime)
+
+Prime can't sync-wake itself, because its own running instance makes the call return 429. To continue past its run deadline (§8), Prime sends an async invoke (`InvocationType: "Event"`, `{reason: "continue"}`) as **the last thing before it returns**.
+
+- Lambda holds a throttled async event and retries it internally, so the event runs as soon as this instance has exited.
+- Set the function's event-invoke config to `MaximumEventAgeInSeconds = 60` and `MaximumRetryAttempts = 0`, so a self-wake that can't land within 60 s expires instead of lingering.
+
+This is the only place we use async invoke.
+
+## 5. Sender: the delivery monitor
+
+Each sender keeps an **unacked set** per recipient: `msg_id → {sent_at, last_wake_at}`.
 
 ```
 send(msg):
-  enqueue msg → recipient.inbox
-  if await_ack(msg.msg_id, ACK_TIMEOUT): return OK            # recipient was awake
-  for attempt in 1..WAKE_RETRIES:
-    async-invoke recipient {reason:"msg", for_msg_id}
-    if await_ack(msg.msg_id, WAKE_TIMEOUT): return OK         # it woke and took it
-  return FAILED     # log error; msg is still in the inbox (eventually the DLQ)
+  enqueue msg → recipient's message queue
+  unacked[recipient][msg.msg_id] = {sent_at: now, last_wake_at: null}
+
+on ack(acked_msg_id) from recipient:
+  delete unacked[recipient][acked_msg_id]
+
+monitor tick (every 500 ms), per recipient with a non-empty unacked set:
+  oldest = earliest unacked entry
+  waited = now - (last wake to this recipient, or oldest.sent_at if no wake yet)
+  limit  = ACK_TIMEOUT if no wake sent yet for these msgs, else WAKE_ACK_TIMEOUT[recipient]
+  if waited > limit:
+    sync_wake(recipient)                     # §4.1; log the result
+    record last_wake_at = now for this recipient
 ```
+
+- **One wake covers every pending message to that recipient.** A woken recipient drains its whole queue.
+- **The original message is never re-sent.** It stays in the queue, and only the wake repeats.
+- Prime and Com **loop forever**, logging each wake. Even if the target keeps failing to start, this costs one small API call every `WAKE_ACK_TIMEOUT`, and the logs make the failure obvious. **[TBD: add a cap?]**
+- Doorman is bounded by API Gateway's ~30 s limit (§7.1).
 
 | Param | Start | Notes |
 |---|---|---|
-| `ACK_TIMEOUT` | 3 s | > the recipient's poll interval + persist time |
-| `WAKE_TIMEOUT` | Com 10 s, Prime 30 s | Prime: cold start + REPL restore |
-| `WAKE_RETRIES` | 3 | `WAKE_TIMEOUT` < 60 s max event age, so each wake has expired before the next one is sent |
+| `ACK_TIMEOUT` | 3 s | First wait, before any wake. Must exceed the recipient's poll interval. |
+| `WAKE_ACK_TIMEOUT` (Prime) | 15 s **[TBD: measure]** | Cold init + comms worker start. *Not* the state restore: Prime acks before it restores (§6). |
+| `WAKE_ACK_TIMEOUT` (Com) | 5 s **[TBD: measure]** | Small Node function |
+| `WAKE_CALL_TIMEOUT` | 2 s | Client-side abort on the Invoke call |
 
-- `await_ack`: Prime and Com watch their own inbox for `ack{acked_msg_id}`. Doorman polls `HEAD acks/<msg_id>` every 250 ms.
-- **The original message is never re-sent.** It stays in the inbox, and the woken recipient drains it. Only the wake is retried.
-- **A sender may not exit while any of its sends is unacked.** This is why Com stays up after a response finishes until Prime acks it.
+## 6. Recipient: the comms worker
 
-## 6. Exit rules
+Prime and Com run all SQS work in a **comms worker** (`worker_threads`), separate from their main thread. On Prime, the main thread can be blocked by a synchronous QuickJS eval or by snapshotting, and acks have to keep flowing anyway. Com uses the same module so there's only one implementation.
 
-**Prime** follows the exit checklist in spec §5.5: agent idle, REPL quiescent, all outbound acked, all inbound handled, checkpoint durable, final poll empty.
+The comms worker owns:
+- polling its own message queue;
+- sending acks;
+- the outbound unacked sets and the delivery monitor (§5);
+- enqueueing outbound messages. The main thread `postMessage`s them to the worker.
 
-**Com** may exit when nothing is in flight, every `http.response` it sent has been acked, and a final inbox poll (`IDLE_GRACE` 2 s) is empty.
+On receiving a message, the worker does this:
 
-**Doorman** is request-scoped. It returns once the handoff finishes, or after about 20 s with `waking`.
+1. **`ack`**: update the unacked set, then delete the message.
+2. **Any other type**: send `ack` to the sender's message queue *right away*, then hand the message and its receipt handle to the main thread. An ack means "I'm awake and I have it".
+   - **Durability** comes from SQS itself. The message stays in the queue, invisible, until the recipient deletes it. If the recipient dies first, the message reappears after the visibility timeout.
 
-### Race walkthrough: recipient exits as a message arrives
+What the main thread does with it:
 
-1. Prime's final poll is empty, and it starts returning.
-2. Com enqueues `http.response` → `prime-inbox`.
-3. No ack within 3 s, so Com async-invokes Prime.
-4. If the old instance is still returning, the invoke is throttled and Lambda retries it within seconds.
-5. A new Prime starts, finds the message, logs it, and acks it.
-6. Com gets the ack and exits.
+| | Dedupe | When to delete the SQS message |
+|---|---|---|
+| **Prime** | `msg_id` in the checkpointed seen set → delete it, skip it | **After the next durable checkpoint** that includes the message's effects (spec §5.4). If Prime crashes before that, the message reappears and the work is redone from the last checkpoint. |
+| **Com** | `request_id` in flight or recently done → delete it, skip it | **On accept**, right away. If Com dies, its requests die with it. That's by design. |
+| **Doorman** | n/a | Doorman only receives acks. It deletes every message it reads, including stale acks from earlier requests. |
 
-No message is lost; the race only costs latency.
+On Lambda, the comms worker starts **first**, before Prime restores its state, so acks go out as soon as init is done. Messages that arrive during restore queue up for the main thread. Before the handler returns, the worker is terminated.
 
-### Race walkthrough: busy recipient, spurious wake
+## 7. Per-Lambda rules
 
-1. Prime is in a 10 s eval, so its ack to Com is late. Com sends a wake, which is throttled.
-2. Prime acks, finishes the turn, and exits.
-3. The retried wake lands within the 60 s max event age. The new Prime sees an empty inbox, logs `stale_wake`, and returns in about 1 s.
+### 7.1 Doorman (request-scoped)
 
-The cost is one short invocation.
+1. The client sends `POST /messages {msg_id, text}`. **The client generates `msg_id`.**
+2. Doorman enqueues `user.message` to `prime-messages`.
+3. Doorman runs the delivery monitor for up to ~20 s, watching `doorman-messages` for the ack.
+4. If the ack arrives, Doorman returns `202 {msg_id}`. If not, it returns `503`. **The client retries with the same `msg_id`**, and Prime dedupes. The client is the last link in the chain of responsibility.
 
-## 7. Failure handling
+### 7.2 Com exit
 
-| Failure | Response |
-|---|---|
-| Com dies with requests in flight | **The requests die with it.** No watchdog and no retry. Prime finds out on its next wake (in practice the next user message): any pending request older than `timeout_s` + 60 s is failed (`error:"lost"`). Its `__pending` promise is rejected, or a model call is reported as failed, and the turn carries on. |
-| Prime dies mid-turn | The next wake replays the log and restores the last snapshot (spec §5.4). Interrupted evals are reported to the model and not re-run. |
-| Wake retries exhausted | `send()` returns FAILED and logs an error. Doorman returns `503`. The message stays in the inbox (and eventually the DLQ). |
-| Poison message | Goes to the DLQ for manual inspection. |
+Com may exit when:
+1. no requests are in flight;
+2. its unacked set is empty: every `http.response` has been acked by Prime;
+3. a final poll of its message queue comes back empty.
 
-## 8. Sequence: one turn with a slow model call
+### 7.3 Prime exit
+
+Pending Com requests **do not** block exit. Waiting on them is the reason to exit. The full checklist is in spec §5.5. In short:
+1. the harness is idle;
+2. the REPL is quiescent;
+3. the unacked set is empty (Com has every request);
+4. the checkpoint is durable;
+5. held messages are deleted;
+6. a final poll of the message queue comes back empty.
+
+## 8. Deadlines
+
+Lambda's hard limit is 15 min, and both Prime and Com set their timeout to it.
+
+- **Prime**: at **12 min** of run time, it stops starting new work, reaches quiescence, checkpoints, sends the async self-wake (§4.2), and returns.
+- **Com**: it accepts (acks) a request only if `now + timeout_s < run_start + 15 min − margin`. Otherwise it leaves the request **unacked** in its queue.
+  - Prime's monitor then keeps waking Com. Those wakes get 429s until this Com exits, and the next Com picks the request up.
+  - Prime can't exit while that request is unacked, so the request can't be stranded.
+  - Com needs no self-wake.
+
+## 9. Walkthroughs
+
+**A. Com believes Prime is awake, but Prime has gone to sleep.**
+1. Prime sent several requests. Some came back while Prime was up.
+2. Prime checkpointed and exited, and one long request is still running.
+3. The long response arrives, and Com enqueues `http.response`. Com doesn't know or care whether Prime is up.
+4. No ack within 3 s, so Com sends a sync wake → `started`.
+5. Prime inits, its comms worker drains the queue and acks, and only then does Prime restore.
+6. Com's unacked set is now empty, so Com exits.
+
+**B. Recipient exiting as a message lands.**
+1. Prime's final poll was empty, and it's mid-return.
+2. Com's message arrives. No ack, so Com wakes Prime → `429` (the instance is still returning).
+3. After `WAKE_ACK_TIMEOUT`, Com wakes again → `started`.
+4. The new Prime drains the queue and acks.
+
+The race costs one `WAKE_ACK_TIMEOUT` of latency. No message is lost.
+
+**C. Busy recipient.**
+1. Prime's main thread is in a 20 s eval, but its comms worker acks immediately.
+2. Even if an ack were late, the resulting wake would get a 429 and leave no trace.
+
+**D. Prime fails to start** (for example, a bad deploy).
+1. The wake returns `failed`, or it returns `started` and init crashes later.
+2. No ack arrives, so the sender wakes again every `WAKE_ACK_TIMEOUT` and logs each attempt.
+3. The messages wait in `prime-messages` until a fix is deployed (or they reach the DLQ).
+
+**E. Prime crashes mid-run.**
+1. Messages it received since the last checkpoint were never deleted, so they reappear after the 15-min visibility timeout.
+2. Nothing wakes Prime automatically. The next user message, or Com response, does.
+3. The new Prime restores the last checkpoint and redoes the work. Side effects of the lost run may repeat, and responses to request IDs it doesn't know are dropped.
+
+This is acceptable for a PoC.
+
+## 10. Sequence: one turn with a slow model call
 
 ```mermaid
 sequenceDiagram
@@ -149,28 +221,27 @@ sequenceDiagram
   participant P as Prime
   participant K as Com
   participant M as Model API
-  C->>D: POST /messages
-  D->>P: user.message → prime-inbox
-  Note over D: no acks/<msg_id> in 3s
-  D-)P: async invoke (wake)
-  P->>P: cheap inbox check → restore
-  P-->>D: write acks/<msg_id>
-  D-->>C: 202 acked
-  P->>P: log, model body → S3
-  P->>K: http.request → com-inbox
+  C->>D: POST /messages {msg_id, text}
+  D->>P: user.message → prime-messages
+  Note over D: no ack in 3s
+  D-)P: sync wake (abort after 2s) → started
+  Note over P: init, comms worker up
+  P-->>D: ack → doorman-messages
+  D-->>C: 202
+  P->>P: restore checkpoint, process user.message
+  P->>K: http.request → com-messages (body in S3)
   Note over P: no ack in 3s
-  P-)K: async invoke (wake)
-  K-->>P: ack → prime-inbox
-  P->>P: exit checklist ✓, checkpoint, EXIT
+  P-)K: sync wake → started
+  K-->>P: ack
+  P->>P: idle → checkpoint, delete held msgs, final poll, EXIT
   K->>M: POST (slow, ~90 s)
   M-->>K: response → streamed to S3
-  K->>P: http.response → prime-inbox
+  K->>P: http.response → prime-messages
   Note over K: no ack in 3s
-  K-)P: async invoke (wake)
-  P->>P: restore, drain, log
-  P-->>K: ack
-  Note over K: idle → EXIT
-  P->>P: continue turn
-  C->>D: GET /events?after=n (polling)
-  D-->>C: new events (from S3)
+  K-)P: sync wake → started
+  P-->>K: ack (from comms worker, before restore)
+  Note over K: unacked empty, nothing in flight → EXIT
+  P->>P: restore, resolve pending, continue turn
+  C->>D: GET /events?after=n
+  D-->>C: new log events (from S3)
 ```

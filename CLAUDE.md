@@ -30,3 +30,10 @@ Always activate the venv first: `source .venv/bin/activate`. Dependencies are in
 
 - `cdk deploy`/`cdk destroy` without `-c env=...` target the stack for the current OS user. Passing `-c env=demo` targets the shared demo stack, so confirm before deploying or destroying it.
 - AWS SSO: Identity Center is in `us-east-2`, but resources live in `us-west-2`.
+
+## GitHub
+
+- The repo is `rravenel/stz-agent` (remote `origin`, over SSH), and the default branch is `main`. Use the `gh` CLI for issues and PRs. It's already authenticated.
+- Reading GitHub (listing or viewing issues, PRs, diffs, checks) is fine anytime.
+- Ask before anything that posts or changes GitHub: opening, editing, commenting on, labeling, closing, or merging issues and PRs, and `git push`. Show what will be posted first.
+- Never push directly to `main`. Work on a branch and open a PR.
