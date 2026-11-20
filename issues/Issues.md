@@ -63,6 +63,19 @@ Implementer and reviewer must be **different agents**: the review is the indepen
 | `blocked` | `blocked`, with the exact ask, @mentioning the person | any phase |
 | `closed` | (already `done`) | the person, after checking the merge on `main` |
 
+### Owner issues: the person is in the loop
+
+Some work only a person can do: anything that needs AWS credentials (deploy, spikes, live runs), package installs, secrets. Don't make an agent issue wait on it. Split it out:
+
+- **The agent issue** goes as far as an agent can: code, scripts, tests, and a `## Run-book` section with the exact commands and what they should print. Its "done" is `CHECK OK`, so it resolves through the normal workflow.
+- **The owner issue** is a separate `NNNN.md` with an `**Assignee**` row naming the person (e.g. `| **Assignee** | @rene |`), `Depends on #<agent issue>`, `## Steps (person)` and `## What to paste back`. `next-issue.py` never hands an issue with an Assignee row to an agent. `next-issue.py A --owner` lists the ones that are ready.
+
+The orchestrator treats the person like any other agent:
+
+1. Each time it picks work, it also runs `next-issue.py <track> --owner`. For each ready owner issue, it creates the Agora task titled `#NNNN <title>` and **assigns it to the person** (`assignee: @rene`).
+2. It then posts **at the top level of the track room** (not only in the task thread), **@mentioning the person**: what to run (point at `## Steps (person)`) and what to paste back. A person isn't woken by a task assignment any more than an agent is. Re-mention them once if the task sits for a while.
+3. The person posts the output in the task thread and @mentions the orchestrator. The orchestrator assigns an agent to record the results in the issue (and in docs, if the issue says so), and review resolves it. A failure becomes a new bug issue for an agent.
+
 ### Hops: let a chain run
 
 A chain like orchestrator → planner → implementer → checker → reviewer → orchestrator is 5–6 agent hops. Agora holds an agent's mention past the room's hop limit (default 3) and flags it `needs_human`. **Each room owner sets `agent_hops` to 8** for `#track-a` and `#track-b` (`PATCH /api/v1/rooms/{room}` or the room settings). A held message isn't lost: a person posting in the thread lets it continue. Agora also pauses agents that go in circles; a second bounce on the same issue is parked as `blocked` anyway.
