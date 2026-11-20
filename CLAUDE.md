@@ -18,6 +18,19 @@ Always activate the venv first: `source .venv/bin/activate`. Dependencies are in
 
 `cdk.json` sets `"profile": "stz-dev"`, so `cdk` commands use it automatically. Plain `aws` commands need `--profile stz-dev` or `AWS_PROFILE=stz-dev`. The account is already CDK-bootstrapped, so don't run `cdk bootstrap`.
 
+### Scripts (agents use these, not the raw commands)
+
+`scripts/` wraps every build and test step so only failures reach your context: one line per step, and an excerpt plus a log path under `.logs/` on failure. Run them from the repo root.
+
+- `scripts/setup.sh`: venv and npm installs. A person runs it, because agent sandboxes can't install packages.
+- `scripts/check.sh`: build and all tests, the verification command. It ends with `CHECK OK` or `CHECK FAILED`.
+- `scripts/build.sh`, `scripts/test.sh [all|py|ts] [args]`: the two halves of `check.sh`.
+- `scripts/deploy.sh [env]`: build and deploy your stack. It needs AWS credentials, so a person runs it.
+
+## Work tracking
+
+Work is tracked as markdown issues in `issues/`, split into two tracks so two teams can work in parallel without conflicts. Read `issues/Issues.md` before picking up work: it covers the tracks, which paths each track owns, the plan → implement → review workflow, and the rule that scripts run in a Haiku subagent. Use `scripts/next-issue.py A|B` to pick the next issue.
+
 ## Architecture
 
 - `app.py` is the CDK entry point. It creates exactly one `StzAgentStack`, named `StzAgent-<env>`. `env` comes from CDK context (`-c env=<name>`) and defaults to the OS username (`getpass.getuser()`), so each developer deploys an isolated copy. It must match `[a-zA-Z][a-zA-Z0-9-]{0,30}`. The shared demo stack is `-c env=demo`.
