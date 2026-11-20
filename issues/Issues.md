@@ -8,17 +8,97 @@ The work follows the two parallel tracks in `docs/spec.md` §10. Each team's orc
 
 | Track | Owner | Milestones | Owns these paths (only this track edits them) |
 |---|---|---|---|
-| **A: infra and plumbing** | Rene's agents | `A0` contracts, `A1` CDK + spike S2, `A2` comms worker, Com, Doorman, `A3` integration, `A4` client + cost report | `app.py`, `stz_agent/`, `tests/unit/`, `functions/package.json` and lockfile, `functions/tsconfig*.json`, `functions/shared/`, `functions/doorman/`, `functions/com/`, `client/`, `scripts/cost-report.ts` |
-| **B: agent harness (Prime)** | offwhite's agents | `B1` spike S1, `B2` Prime REPL, loop and adapters, `B3` checkpoint and exit, `B4` demo run | `spikes/s1-quickjs/`, `functions/prime/` |
+| **A: infra and plumbing** | @rene and Rene's agents (A0: Elliot) | `A0` contracts, `A1` CDK + spike S2, `A2` comms worker, Com, Doorman, `A3` integration, `A4` client + cost report | `app.py`, `stz_agent/`, `tests/unit/`, `functions/package.json` and lockfile, `functions/tsconfig*.json`, `functions/shared/`, `functions/doorman/`, `functions/com/`, `client/`, `scripts/cost-report.ts` |
+| **B: agent harness (Prime)** | @offwhite (Brennan) and Brennan's agents | `B1` spike S1, `B2` Prime REPL, loop and adapters, `B3` checkpoint and exit, `B4` demo run | `spikes/s1-quickjs/`, `functions/prime/` |
 
-The Owner column is a default; swap it if the teams agree. Rules that keep the tracks out of each other's way:
+A0 is the exception: Elliot (@offwhite's agent) builds it, Track B reviews it, and then A1 and B1 start. Rules that keep the tracks out of each other's way:
 
 - **Pick work with `scripts/next-issue.py A` (or `B`)**, not `list-issues.py --next`: the latter drains the earliest milestone across *both* tracks. `scripts/next-issue.py B --list` shows one track with what each issue waits on. `./scripts/list-issues.py` is still the overall status view.
 - **`A0` is the only shared milestone.** It defines the contracts both tracks code against (`functions/shared/envelope.ts`, S3 keys, `state.json` types, the comms-worker interface and its in-memory fake). Track A builds it in the first ~20 minutes; Track B reviews it. After `A0` lands, a change to `functions/shared/` that Track B depends on needs a note on the Track B issue it affects.
 - **Track B never edits Track A's paths, and vice versa.** If you need something there (a dependency, an env var on the Prime function, a stack output), file an issue in the other track's next milestone, reference it with "Depends on #NNNN", and work around it with the fake until it lands.
 - **npm dependencies:** Track B adds its packages to `functions/prime/package.json` only. On a `functions/package-lock.json` conflict, take the other side's lockfile and re-run `scripts/setup.sh`; never hand-merge a lockfile.
-- **Branches:** one branch per issue, `track-a/NNNN-short-name` or `track-b/NNNN-short-name`, merged to `main` by PR (`CLAUDE.md`: never push to `main`).
+- **Branches:** one branch per issue, `track-a/NNNN-short-name` or `track-b/NNNN-short-name`. Agents push these branches; a person merges them to `main` by PR. Nobody pushes to `main` directly.
 - **Cross-track dependencies** are written in prose as `Depends on #NNNN`, which both listing scripts read.
+
+## Working in Agora (how the workflow runs here)
+
+We don't use Claude Code subagents. Every phase of the workflow below is done by a **separate Agora agent**, a member with its own handle, model and instructions. Each team runs its agents on its own computer with `kolo runner`, so the two teams' agents never share a machine, a checkout or a subscription. Wherever the rest of this guide says "subagent", read "the agent for that phase", and "dispatch" means "@mention it in the issue's task thread".
+
+### Rooms
+
+| Room | Who | Used for |
+|---|---|---|
+| `#hackathon` | both people, both teams' agents | cross-track questions, A0 review, requests for the other track, status |
+| `#track-a` | @rene, Rene's agents | all Track A issue work |
+| `#track-b` | @offwhite, Brennan's agents | all Track B issue work |
+
+Keep phase traffic in the track rooms. Each runner keeps a CLI session per agent **per room**, so a crowded room fills every agent's context.
+
+### Agents: one per role, per team
+
+| Role | Model | Does | Suggested (Track B) |
+|---|---|---|---|
+| **Orchestrator** | Opus, or the person | picks the next issue, opens its Agora task, wakes the planner, collects blocked asks | Gideon, or @offwhite |
+| **Planner** | Fable (`claude-fable-5-2`) | phase 1: probes prerequisites, writes `## Prerequisites` + `## Plan`. No code | new agent |
+| **Implementer** | Sonnet (`claude-sonnet-5-5`) | phase 2 | new agent |
+| **Reviewer** | Opus (`claude-opus-5-5`) | phase 3 | Elliot |
+| **Checker** | Haiku (`claude-haiku-5-5`) | runs a named script on a named branch in its own clone and replies with the stdout verbatim, nothing else | Joey |
+
+Implementer and reviewer must be **different agents**: the review is the independent check. All of a team's agents have `workspace` access, and their `mention_policy` is `owner` (only their own person and that person's agents can wake them) unless a room needs otherwise.
+
+### One issue = one Agora task
+
+1. The orchestrator runs `scripts/next-issue.py A|B` and creates a task in the track room: title `#NNNN <issue title>`, body with the issue path, milestone and branch name (`track-b/NNNN-short-name`). Every phase happens **in that task's thread**.
+2. It wakes the planner with an @mention in the thread. Task assignment alone only puts the task in the agent's inbox; **a hosted agent is woken only by an @mention or by a reply in a thread it started.**
+3. Each phase ends by **@mentioning the next agent with an explicit instruction**, e.g. "@reviewer-b review #0012 on `track-b/0012-repl` at `abc1234`". End with that ask, not a bare status report. Agora's guard doesn't wake anyone for thanks or status reports.
+4. Task status follows the issue:
+
+| Issue status | Agora task | Set by |
+|---|---|---|
+| `open` (planned) | `open` | planner |
+| `in-progress` | `claimed` (`claim_task`) | implementer |
+| implementation drafted | `needs_review` | implementer |
+| `resolved` | `done`, with the resolve commit in the note | reviewer |
+| bounced to `open` | `open`, with the review notes | reviewer |
+| `blocked` | `blocked`, with the exact ask, @mentioning the person | any phase |
+| `closed` | (already `done`) | the person, after merging the PR |
+
+### Hops: let a chain run
+
+A chain like orchestrator → planner → implementer → checker → reviewer → orchestrator is 5–6 agent hops. Agora holds an agent's mention past the room's hop limit (default 3) and flags it `needs_human`. **Each room owner sets `agent_hops` to 8** for `#track-a` and `#track-b` (`PATCH /api/v1/rooms/{room}` or the room settings). A held message isn't lost: a person posting in the thread lets it continue. Agora also pauses agents that go in circles; a second bounce on the same issue is parked as `blocked` anyway.
+
+### Workspaces and git: one clone per agent, exchange through GitHub
+
+- Agents on one runner share its `--workspace`. Two agents switching branches in the same checkout corrupt each other's work, and `git worktree` doesn't help, because the worktree's `.git` points outside the agent's sandbox. So **each agent gets its own clone**:
+
+  ```sh
+  # once per agent (example for Track B)
+  git clone https://github.com/rravenel/stz-agent ~/Developer/Hackathon/agents/<agent>/stz-agent
+  # runner: one --workspace-for per agent, then restart it
+  kolo runner --profile agora --workspace ~/Developer \
+    --workspace-for <agent>=~/Developer/Hackathon/agents/<agent>/stz-agent  ...
+  ```
+
+- Work moves between agents **through GitHub**. Agents fetch over HTTPS (git over SSH is blocked in the sandbox) and push **only their issue branch**. The next agent fetches that branch. Before starting, every phase runs `git fetch origin && git switch <branch> && git pull --ff-only` (or creates the branch from `origin/main`).
+- Because the next phase runs in another clone, **every phase commits and pushes its issue-markdown changes**. This differs from the skill, which keeps drafts uncommitted:
+  - planner: `#NNNN Plan`
+  - implementer: the code commit, then `#NNNN Notes: implementation drafted` (status stays `in-progress`)
+  - reviewer: `#NNNN Resolve: <title>` or `#NNNN Review: <reason>`
+  - The `in-progress` flip rides along with the implementer's drafted notes.
+- `issues/*.md` on `main` changes only when a PR merges, so the **live status is the Agora task**. Run `scripts/next-issue.py` on `origin/main` with the open PR branches in mind.
+
+### What only people do
+
+- Run `scripts/setup.sh` after any dependency change. Agent sandboxes can't install packages: pip's temporary `cacert.pem` is denied, and package registries are unreachable.
+- Anything needing AWS: `scripts/deploy.sh`, the spikes, integration and the demo.
+- Merge PRs to `main`, and move issues to `closed` or `wontfix`.
+- Set up agents, rooms, `agent_hops` and the runner's `--workspace-for` clones.
+
+An agent that hits one of these sets the issue and task to `blocked`, writes the exact ask, and @mentions its person (@rene or @offwhite).
+
+### Cross-track requests
+
+Ask in `#hackathon`, @mentioning the other track's person: one team's agents can't wake the other team's agents (`mention_policy: owner`). The person files the issue in their track (`Depends on #NNNN`) or relays to their own agent.
 
 ## Scripts: deterministic build and test, failures only
 
@@ -34,7 +114,7 @@ All building and testing goes through `scripts/`. Never call `pytest`, `npm test
 | `scripts/next-issue.py A\|B [--list]` | next workable issue for a track | no |
 | `scripts/list-issues.py` | overall status view (from the issues skill) | no |
 
-**Run the scripts in a Haiku subagent.** Implementation and review subagents don't run `check.sh` in their own context. They dispatch a fresh **Haiku** subagent with: *"From the repo root, run `scripts/check.sh` (or the named script). Reply with its stdout verbatim and nothing else."* The script's output is already short; the point is that nothing else (retries, log spelunking) lands in the Sonnet or Opus context. If a step fails, the caller decides whether to read `.logs/<step>.log`.
+**Who runs the scripts.** The scripts are quiet by design: one line per step, errors only. So the **implementer** runs `scripts/check.sh` itself while working. The **verification of record** for review is a run by the team's **Checker** (Haiku), in its own clean clone: the reviewer @mentions it with *"Run `scripts/check.sh` on `<branch>` at `<commit>` and reply with its stdout verbatim and nothing else."* The checker replies in the thread, which wakes the reviewer again. If a step fails, the reviewer decides whether to ask for `.logs/<step>.log` (by `grep`/`tail`, never whole).
 
 **TS package contract.** Every TS package (`functions/`, `client/`) defines npm scripts `typecheck` (`tsc --noEmit`), `build` (esbuild bundles into `dist/`) and `test` (vitest, `vitest run`). The scripts above pick them up automatically; nothing else needs wiring.
 
@@ -152,7 +232,7 @@ This queue is meant to be worked for hours with nobody at the keyboard. Two rule
 
 **A blocker stops one issue, never the run.** If something needs a human — a permission, a credential, a device, an approval, a project policy — first try to work around it: retry once reading the real error, find another route to the same result, or narrow the scope and ship the part that works (filing the rest as its own linked issue). Only when none of that produces anything shippable, set the issue to `blocked`, write the `## Blocked` section with an exact ask, and hand back. The orchestrator takes the next workable issue immediately and collects every human ask into one report at the end of the run.
 
-**What still stops an agent cold.** Deciding reversible calls doesn't extend to the owner's own calls. Without a direct instruction, never: set `closed` or `wontfix`; push, deploy, publish, or take any other outward-facing action; spend money; delete or rewrite history; edit a document the owner owns (record the proposed amendment in `## Gotchas`); touch a sibling repo; or override a prohibition in this file or `CLAUDE.md`.
+**What still stops an agent cold.** Deciding reversible calls doesn't extend to the owner's own calls. Without a direct instruction, never: set `closed` or `wontfix`; push anything but your own issue branch, merge to `main`, deploy, publish, or take any other outward-facing action; spend money; delete or rewrite history; edit a document the owner owns (record the proposed amendment in `## Gotchas`); touch a sibling repo; or override a prohibition in this file or `CLAUDE.md`.
 
 <!-- Add this project's own hard stops here — e.g. "no agent launches a
      browser without the owner's say-so for that run". -->
@@ -264,7 +344,7 @@ When status moves to `resolved` or `closed`, add a `**Closed**` row with the dat
 
 ## The standard workflow (plan → implement → review)
 
-Issues move from filed to resolved through a **three-phase pipeline**. Each phase runs in a **fresh subagent** dispatched by the orchestrator, on the model that fits the work:
+Issues move from filed to resolved through a **three-phase pipeline**. Each phase is done by **that phase's Agora agent** (see "Working in Agora"), woken in the issue's task thread, on the model that fits the work:
 
 | Phase | When | Model | The subagent does | Status after |
 |---|---|---|---|---|
@@ -272,17 +352,17 @@ Issues move from filed to resolved through a **three-phase pipeline**. Each phas
 | **2. Implementation** | when the issue is worked | **Sonnet** | follows the plan, fixes, builds + verifies, code commit, drafts resolution sections | `in-progress` |
 | **3. Review** | after implementation returns | **Opus** | independently re-verifies the diff, then approves or bounces | `resolved` or `open` |
 
-Fresh context per phase is deliberate: each subagent reloads this guide and `CLAUDE.md` cleanly, so edits to those files take effect on the next dispatch. The top model runs *only* in a subagent, never in the orchestrator's own context, to keep its large context isolated.
+Agora agents keep a CLI session per room, so they are **not** fresh between issues. That's why every phase still starts by re-reading this guide, `CLAUDE.md` and the issue file, and why each phase is a different agent.
 
 ### Orchestrator: pick and dispatch
 
-1. **Refresh the pricing cache if stale.** If `issues/model-pricing.json` is missing or its `fetched` date isn't today, fetch current model prices and rewrite it (once per day). See "Token usage and cost tracking" below.
-2. **Pick the issue with `./scripts/list-issues.py --next`** — the lowest-numbered issue that is `open`, not `blocked`, and has no unresolved dependency. It already carries `## Prerequisites` and a `## Plan` from phase 1. Nothing on stdout means no workable issue is left: stop the run and report. Don't hand-roll the pick by globbing `issues/*.md`.
-3. **Dispatch a fresh Sonnet subagent** (phase 2) with the issue id and instructions to follow the implementation steps below.
-4. **When it returns, record its usage** and dispatch a fresh **Opus reviewer** (phase 3) for the same issue. Record the reviewer's usage when it returns.
+1. **Pricing cache:** skip it. Agora agents can't read each other's transcripts (see "Token usage and cost tracking").
+2. **Pick the issue with `scripts/next-issue.py A|B`** (per track; see "Two tracks"). Then open its Agora task and @mention the planner, or the implementer if the issue already has a `## Plan`. `./scripts/list-issues.py --next`, the skill's picker, would cross tracks; don't use it here. `next-issue.py` returns the lowest-numbered issue in the track's earliest milestone that is `open`, not `blocked`, and has no unresolved dependency. Nothing on stdout (exit 1) means no workable issue is left: stop and report. Don't hand-roll the pick by globbing `issues/*.md`.
+3. **The implementer** (phase 2) is woken by the planner's handoff, or by the orchestrator.
+4. **The implementer hands off to the reviewer** (phase 3). The reviewer asks the checker for the verification run.
 5. If the reviewer bounced the issue back to `open`, re-dispatch phase 2 **once**; a second bounce gets parked as `blocked` rather than looped again. Otherwise go back to step 2 for the next issue (or stop if only one was requested).
 
-**Never stall the loop.** A subagent that returns "parked as `blocked`" is not a reason to stop or to ask — go straight back to step 2. Collect every human ask into a single end-of-run report: what was resolved, what is parked and the exact ask for each, and which issues carry a `**Wants owner feedback:**` marker.
+**Never stall the loop.** An agent that reports "parked as `blocked`" is not a reason to stop or to ask — go straight back to step 2. Collect every human ask into a single end-of-run report: what was resolved, what is parked and the exact ask for each, and which issues carry a `**Wants owner feedback:**` marker.
 
 Usage is recorded per phase — locate the subagent's transcript, sum token counts (deduped by `requestId`), note the model, compute cost, and append a `## Work log` row. Bails and bounces get a row too. If the user names a specific issue ("fix 0046"), dispatch phase 2 to that id directly.
 
@@ -298,7 +378,7 @@ A subagent starts with fresh context, so its first job is loading the project's 
    If the two guides disagree, prefer `CLAUDE.md` for code/repo conventions and this file for issue-tracking specifics. Read only this issue and any it explicitly depends on — not the whole tracker.
 
 2. **Read `## Prerequisites` before anything else.** The planner already probed the environment. An item marked `**Needs owner:**` is a wall it could not clear; if unmet prerequisites gate only part of the work, implement the part they don't gate.
-3. **Set status to `in-progress`** in the markdown — working copy only, no commit. The Mac app picks it up immediately.
+3. **Set status to `in-progress`** in the markdown and `claim_task` the Agora task. The markdown flip is committed with your drafted notes in step 9 (see "Working in Agora").
 4. **Make the code changes** required to fix the bug, following the `## Plan`. If you deviate, note why in `## Fix` so the reviewer understands. Decide reversible calls yourself and record them (see "Working unattended"); work around obstacles before giving up.
 5. **Build *and* run the project's verification command, and confirm tests actually executed and passed.** Mandatory; cannot be shortcutted.
 
@@ -329,7 +409,7 @@ A subagent starts with fresh context, so its first job is loading the project's 
      - **`## Files changed`** — one bullet per file, with a short note on what changed.
      - **`## Gotchas`** *(optional)* — surprises, dead ends, non-obvious behavior. Skip if nothing's notable; be specific when present.
 
-9. **Do not commit the markdown draft.** Return to the orchestrator with a one-line summary. The reviewer makes the single resolution commit in phase 3.
+9. **Commit and push the draft** as `#NNNN Notes: implementation drafted`, so the reviewer's clone can fetch it. Set the task to `needs_review`, then @mention the reviewer with the branch and commit hash. The reviewer makes the resolution commit in phase 3.
 
 ### Phase 3 — Review subagent (Opus): verify → resolve or bounce
 
@@ -346,7 +426,7 @@ Status flow: `open` (with `## Prerequisites` + `## Plan`) → `in-progress` → 
 
 ### Build / verify command for this project
 
-- **`scripts/check.sh`**, run by a Haiku subagent (see "Scripts" above). It must end with `CHECK OK`, and the `pytest` / `test-functions` lines must show a non-zero passed count that includes any tests you added.
+- **`scripts/check.sh`**. The implementer runs it while working; the team's Checker agent runs it for review (see "Scripts" above). It must end with `CHECK OK`, and the `pytest` / `test-functions` lines must show a non-zero passed count that includes any tests you added.
 - Narrower runs while iterating: `scripts/test.sh py -k <name>`, `scripts/test.sh ts <file-filter>`.
 - Work that needs AWS (deploys, spikes S1-in-Lambda and S2, integration, the demo) is verified by a person with `scripts/deploy.sh` plus the steps named in the issue. Until they report back, the issue is `blocked` with the exact ask.
 
@@ -374,7 +454,7 @@ Never use `wontfix` or `closed` to escape a stuck issue, and never use `blocked`
 
 ## Token usage and cost tracking
 
-Every subagent dispatch gets a usage record on the issue it worked: which model did the work, exactly how many tokens it consumed, and an estimated cost. The **orchestrator** records this after the subagent returns — a subagent can't measure its own totals. Under the three-phase workflow each issue accumulates a row per phase — **planning (Fable), recorded at filing time; implementation (Sonnet); review (Opus)** — plus a row for every bounce or bail.
+**In Agora this section is best-effort.** Each run's transcript stays on its owner's runner, so record the model and phase with `—` for tokens and cost unless the person adds them; Agora's agent pages show runs per agent. Otherwise, every dispatch gets a usage record on the issue it worked: which model did the work, exactly how many tokens it consumed, and an estimated cost. The **orchestrator** records this after the subagent returns — a subagent can't measure its own totals. Under the three-phase workflow each issue accumulates a row per phase — **planning (Fable), recorded at filing time; implementation (Sonnet); review (Opus)** — plus a row for every bounce or bail.
 
 ### Pricing cache (`issues/model-pricing.json`)
 
