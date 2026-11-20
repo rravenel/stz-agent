@@ -36,7 +36,7 @@ All building and testing goes through `scripts/`. Never call `pytest`, `npm test
 
 **Run the scripts in a Haiku subagent.** Implementation and review subagents don't run `check.sh` in their own context. They dispatch a fresh **Haiku** subagent with: *"From the repo root, run `scripts/check.sh` (or the named script). Reply with its stdout verbatim and nothing else."* The script's output is already short; the point is that nothing else (retries, log spelunking) lands in the Sonnet or Opus context. If a step fails, the caller decides whether to read `.logs/<step>.log`.
 
-**TS package contract.** Every TS package (`functions/`, `client/`) defines npm scripts `typecheck` (`tsc --noEmit`), `build` (esbuild bundles into `dist/`) and `test` (vitest, `vitest run`). The scripts above pick them up automatically; nothing else needs wiring.
+**TS package contract.** Every TS package (`functions/`, `client/`) defines npm scripts `typecheck` (`tsc --noEmit`), `build` (esbuild bundles into `dist/`) and `test` (`node --test` on `*.test.ts`; Node runs TypeScript directly, so tests need no installed packages). The scripts above pick them up automatically; nothing else needs wiring.
 
 **Agent sandbox limits** (hosted Agora agents):
 - `scripts/setup.sh` can't run inside the agent sandbox: pip writes a temporary `cacert.pem`, and `*.pem` paths are denied. Package registries may be blocked too. **A person runs `scripts/setup.sh`** after any dependency change; agents then run `check.sh` normally.
