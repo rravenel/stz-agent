@@ -1,0 +1,25 @@
+{
+  "name": "stz-functions",
+  "private": true,
+  "type": "module",
+  "description": "Lambda functions for stz-agent: Doorman, Prime, Com and the code they share.",
+  "workspaces": [
+    "shared",
+    "doorman",
+    "prime",
+    "com"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "build": "node build.mjs",
+    "test": "node --test --test-reporter=spec \"*/src/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

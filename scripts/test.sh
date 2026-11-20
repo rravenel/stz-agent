@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run unit tests quietly: Python (pytest, CDK assertions) and TypeScript
-# (`npm test` in each TS package that defines it). A suite that runs zero
+# (`npm test` in each TS package that defines it: node --test or vitest). A suite that runs zero
 # tests counts as a failure.
 #
 # Usage: scripts/test.sh [all|py|ts] [extra args for the test runner]
@@ -23,8 +23,10 @@ run_ts() {
   local pkg
   for pkg in $(ts_packages); do
     has_npm_script "$pkg" test || continue
-    SUMMARY_RE='^ *Tests +[0-9]'
-    EMPTY_RE='no test files found|Tests +0 '
+    # node --test (spec reporter) ends with "ℹ tests N / ℹ pass N / ℹ fail N";
+    # vitest prints "Tests  N passed". Either runner works.
+    SUMMARY_RE='^ℹ pass [0-9]+|^ *Tests +[0-9]'
+    EMPTY_RE='^ℹ tests 0$|no test files found|Tests +0 '
     step "test-$pkg" npm --prefix "$pkg" test -s -- "$@"
   done
 }

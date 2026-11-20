@@ -10,3 +10,8 @@ cdk.out
 
 # Full logs from scripts/*.sh (only failures are printed)
 .logs/
+
+# TypeScript packages
+node_modules/
+functions/dist/
+client/dist/
