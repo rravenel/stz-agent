@@ -9,6 +9,7 @@
 # Output: one line per step; failures print an excerpt and the log path.
 source "$(dirname "$0")/lib.sh"
 
+check_node
 for pkg in $(ts_packages); do
   for s in typecheck build; do
     if has_npm_script "$pkg" "$s"; then

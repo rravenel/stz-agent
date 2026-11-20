@@ -5,11 +5,7 @@ Infrastructure is defined with the AWS CDK (Python) and deploys to `us-west-2`.
 
 ## One-time setup
 
-Prerequisites: AWS CLI v2, Node 22+ (24 recommended), Python 3.12, and the CDK CLI:
-
-```
-npm install -g aws-cdk
-```
+Prerequisites: AWS CLI v2, Node 22 (`.nvmrc`), and Python 3.12 (`.python-version`; `uv python install 3.12` works). The CDK CLI is pinned in `functions/package.json` and installed by `scripts/setup.sh`, so don't install it globally.
 
 1. **Accept your IAM Identity Center invite** (email) and set your password and MFA.
 2. **Create the CLI profile.** It must be named `stz-dev`, because `cdk.json` uses that name:
@@ -26,12 +22,11 @@ npm install -g aws-cdk
    | Profile name | `stz-dev` |
 
    Verify with `aws sts get-caller-identity --profile stz-dev`.
-3. **Create the Python venv**, from the repo root:
+3. **Install dependencies**, from the repo root:
    ```
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt -r requirements-dev.txt
+   scripts/setup.sh
    ```
+   It creates `.venv` with Python 3.12 and installs exactly what the lock files say: `requirements.lock` (hash-checked) and `functions/package-lock.json` (`npm ci`). To add or upgrade a dependency, edit `requirements.txt`/`requirements-dev.txt` or a `package.json`, run `scripts/lock.sh` (`--upgrade` for newest allowed versions), and commit the lock files with the change.
 
 The account is already bootstrapped for CDK, so you don't need to run `cdk bootstrap`.
 
@@ -40,8 +35,10 @@ The account is already bootstrapped for CDK, so you don't need to run `cdk boots
 ```
 source .venv/bin/activate
 aws sso login --profile stz-dev     # when your 8-hour session expires
-cdk deploy                          # deploys your own stack, StzAgent-<your username>
+scripts/deploy.sh                   # deploys your own stack, StzAgent-<your username>
 ```
+
+`scripts/deploy.sh` uses the pinned CDK CLI and the venv's Python. If you run `cdk` by hand, use `functions/node_modules/.bin/cdk` with the venv activated.
 
 Each developer gets their own stack, named from your OS username. Override the name with `-c env=<name>`. For example, the shared demo stack is deployed with `cdk deploy -c env=demo`.
 

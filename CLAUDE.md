@@ -8,7 +8,7 @@ stz-agent is a "Scale to Zero" cloud agent architecture. Infrastructure is defin
 
 ## Commands
 
-Always activate the venv first: `source .venv/bin/activate`. Dependencies are in `requirements.txt` (CDK libs) and `requirements-dev.txt` (pytest).
+Always activate the venv first: `source .venv/bin/activate`. Direct dependencies are in `requirements.txt` (CDK libs) and `requirements-dev.txt` (pytest); `requirements.lock` pins every package with hashes and is what gets installed. The toolchain is pinned by `.python-version` (3.12, enforced) and `.nvmrc` (Node 22, warned). The CDK CLI is pinned in `functions/package.json` (`functions/node_modules/.bin/cdk`), not installed globally.
 
 - `pytest`: run all unit tests
 - `pytest tests/unit/test_stz_agent_stack.py::test_sqs_queue_created`: run a single test
@@ -22,14 +22,15 @@ Always activate the venv first: `source .venv/bin/activate`. Dependencies are in
 
 `scripts/` wraps every build and test step so only failures reach your context: one line per step, and an excerpt plus a log path under `.logs/` on failure. Run them from the repo root.
 
-- `scripts/setup.sh`: venv and npm installs. A person runs it, because agent sandboxes can't install packages.
+- `scripts/setup.sh`: venv and npm installs, exactly from the lock files. A person runs it, because agent sandboxes can't install packages.
+- `scripts/lock.sh [--upgrade]`: re-resolve `requirements.lock` and `functions/package-lock.json` after a dependency change, then run setup. A person runs it; commit the lock files with the change.
 - `scripts/check.sh`: build and all tests, the verification command. It ends with `CHECK OK` or `CHECK FAILED`.
 - `scripts/build.sh`, `scripts/test.sh [all|py|ts] [args]`: the two halves of `check.sh`.
 - `scripts/deploy.sh [env]`: build and deploy your stack. It needs AWS credentials, so a person runs it.
 
 ## Work tracking
 
-Work is tracked as markdown issues in `issues/`, split into two tracks so two teams can work in parallel without conflicts. Read `issues/Issues.md` before picking up work: it covers the tracks, which paths each track owns, the plan → implement → review workflow, and the rule that scripts run in a Haiku subagent. Use `scripts/next-issue.py A|B` to pick the next issue.
+Work is tracked as markdown issues in `issues/`, split into two tracks so two teams can work in parallel without conflicts. Read `issues/Issues.md` before picking up work: it covers the tracks, which paths each track owns, the plan → implement → review workflow, and the rule that scripts run in a Haiku subagent. Use `scripts/next-issue.py A|B` to pick the next issue (`I` for the cross-track build-infrastructure milestone).
 
 ## Architecture
 

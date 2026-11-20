@@ -19,7 +19,11 @@
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
+    "aws-cdk": "2.1149.0",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "esbuild": false
   }
 }

@@ -76,7 +76,45 @@ venv_python() {
     echo "FAIL setup: .venv missing; run scripts/setup.sh" >&2
     return 1
   fi
+  check_venv_python || return 1
   printf '%s\n' "$ROOT/.venv/bin/python"
+}
+
+# The pinned toolchain: .python-version (exact minor) and .nvmrc (Node major).
+PY_WANT="$(tr -d '[:space:]' <"$ROOT/.python-version")"
+NODE_WANT="$(tr -d '[:space:]' <"$ROOT/.nvmrc")"
+
+# Prints "major.minor" of a Python interpreter.
+py_minor() { "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null; }
+
+# Fails if the venv's Python is not the pinned version (a venv made with
+# another interpreter would resolve different wheels).
+check_venv_python() {
+  local have; have="$(py_minor "$ROOT/.venv/bin/python")"
+  if [ "$have" != "$PY_WANT" ]; then
+    echo "FAIL setup: .venv is Python ${have:-?}, need $PY_WANT (.python-version); run scripts/setup.sh" >&2
+    return 1
+  fi
+}
+
+# Warns (never fails) when local Node's major differs from .nvmrc. Bundles are
+# pinned by esbuild's `target`, so a newer Node still builds the same output,
+# but tests run on the local Node.
+check_node() {
+  local have; have="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null)"
+  if [ "$have" != "$NODE_WANT" ]; then
+    echo "warn node is v${have:-?}, .nvmrc pins $NODE_WANT (Lambda runtime); tests run on the local Node"
+  fi
+}
+
+# The CDK CLI pinned in functions/package.json (exact version, in the lockfile).
+cdk_cli() {
+  local bin="$ROOT/functions/node_modules/.bin/cdk"
+  if [ ! -x "$bin" ]; then
+    echo "FAIL setup: pinned CDK CLI missing ($bin); run scripts/setup.sh" >&2
+    return 1
+  fi
+  printf '%s\n' "$bin"
 }
 
 # TypeScript package directories that exist (functions/ workspace, client/).

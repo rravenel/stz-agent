@@ -16,7 +16,7 @@ A0 is the exception: Elliot (@offwhite's agent) builds it, Track B reviews it, a
 - **Pick work with `scripts/next-issue.py A` (or `B`)**, not `list-issues.py --next`: the latter drains the earliest milestone across *both* tracks. `scripts/next-issue.py B --list` shows one track with what each issue waits on. `./scripts/list-issues.py` is still the overall status view.
 - **`A0` is the only shared milestone.** It defines the contracts both tracks code against (`functions/shared/envelope.ts`, S3 keys, `state.json` types, the comms-worker interface and its in-memory fake). Track A builds it in the first ~20 minutes; Track B reviews it. After `A0` lands, a change to `functions/shared/` that Track B depends on needs a note on the Track B issue it affects.
 - **Track B never edits Track A's paths, and vice versa.** If you need something there (a dependency, an env var on the Prime function, a stack output), file an issue in the other track's next milestone, reference it with "Depends on #NNNN", and work around it with the fake until it lands.
-- **npm dependencies:** Track B adds its packages to `functions/prime/package.json` only. On a `functions/package-lock.json` conflict, take the other side's lockfile and re-run `scripts/setup.sh`; never hand-merge a lockfile.
+- **npm dependencies:** Track B adds its packages to `functions/prime/package.json` only. On a `functions/package-lock.json` (or `requirements.lock`) conflict, take the other side's lockfile and have a person re-run `scripts/lock.sh`; never hand-merge a lockfile.
 - **Branches and worktrees:** each issue is worked on its own branch, `track-a/NNNN-short-name` or `track-b/NNNN-short-name`, in its own **git worktree**. The main checkout always stays on `main`. Only a change that has passed review is merged to `main` and pushed (see "Workspaces and git").
 - **Cross-track dependencies** are written in prose as `Depends on #NNNN`, which both listing scripts read.
 
@@ -118,11 +118,12 @@ All building and testing goes through `scripts/`. Never call `pytest`, `npm test
 
 | Script | What it does | Needs AWS |
 |---|---|---|
-| `scripts/setup.sh` | Creates `.venv` and installs Python deps; `npm ci` in each TS package | no (network) |
+| `scripts/setup.sh` | Creates `.venv` with the `.python-version` Python and installs `requirements.lock` (hash-checked); `npm ci` in each TS package | no (network) |
+| `scripts/lock.sh [--upgrade]` | Re-resolves `requirements.lock` and each `package-lock.json` after a dependency change, then runs setup. A person runs it | no (network) |
 | `scripts/build.sh` | `typecheck` + `build` npm scripts in `functions/` and `client/` (when present), then CDK synth into `cdk.out/` | no |
 | `scripts/test.sh [all\|py\|ts] [args]` | pytest (CDK assertions) and `npm test` per TS package. **Zero tests run counts as a failure** | no |
 | `scripts/check.sh` | `build.sh` then `test.sh all`; ends with `CHECK OK` or `CHECK FAILED` | no |
-| `scripts/deploy.sh [env]` | build, then `cdk deploy` of your stack with `stz-dev`; prints stack outputs. `demo` requires `--yes` | **yes** |
+| `scripts/deploy.sh [env]` | build, then `cdk deploy` (the pinned CLI in `functions/`) of your stack with `stz-dev`; prints stack outputs. `demo` requires `--yes` | **yes** |
 | `scripts/next-issue.py A\|B [--list]` | next workable issue for a track | no |
 | `scripts/list-issues.py` | overall status view (from the issues skill) | no |
 

@@ -14,12 +14,16 @@ fi
 
 "$ROOT/scripts/build.sh" || exit 1
 
-CDK="$(command -v cdk || echo 'npx --yes aws-cdk@2')"
+# The CDK CLI pinned in functions/package-lock.json, never a global or npx one.
+CDK="$(cdk_cli)" || exit 1
+venv_python >/dev/null || exit 1
 step aws-identity aws sts get-caller-identity --profile stz-dev || {
   echo "     run: aws sso login --profile stz-dev"; exit 1; }
+# --app runs the venv's Python: cdk.json's `python3 app.py` would pick up
+# whatever python3 is on PATH outside an activated venv.
 # --require-approval never: this is a personal dev stack (or demo with --yes).
-step "cdk-deploy-$env_name" $CDK deploy -c env="$env_name" --require-approval never \
-  --outputs-file "$ROOT/cdk.out/outputs-$env_name.json" || finish
+step "cdk-deploy-$env_name" "$CDK" deploy --app ".venv/bin/python app.py" -c env="$env_name" \
+  --require-approval never --outputs-file "$ROOT/cdk.out/outputs-$env_name.json" || finish
 cat "$ROOT/cdk.out/outputs-$env_name.json"
 
 finish
