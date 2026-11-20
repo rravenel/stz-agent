@@ -15,7 +15,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
     "build": "node build.mjs",
-    "test": "node --test --test-reporter=spec \"*/src/**/*.test.ts\""
+    "test": "node --test --test-reporter=spec \"*/src/**/*.test.ts\" \"../scripts/*.test.ts\""
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
