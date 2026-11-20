@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { WorkerComms } from "./comms-worker.ts";
+import { UnackedTracker, WorkerComms } from "./comms-worker.ts";
 import type { Delivery } from "./comms.ts";
 
 test("WorkerComms (memory mode): send → delivery reaches the handler → stop resolves", async () => {
@@ -14,4 +14,27 @@ test("WorkerComms (memory mode): send → delivery reaches the handler → stop 
   for (let i = 0; i < 50 && c.unackedCount() > 0; i++) await new Promise((r) => setTimeout(r, 20));
   assert.equal(c.unackedCount(), 0, "the self-ack cleared it");
   await c.stop();
+});
+
+test("UnackedTracker: a stale push (ack of A) does not hide in-flight send B", () => {
+  const u = new UnackedTracker();
+  u.posted1(); // send A
+  u.push(1, 1); // worker saw A
+  assert.equal(u.count(), 1);
+  u.posted1(); // send B, still in flight to the worker
+  u.push(0, 1); // worker: A acked (pushed before it saw B)
+  assert.equal(u.count(), 1, "B still counts");
+  u.push(1, 2); // worker saw B
+  assert.equal(u.count(), 1);
+  u.push(0, 2); // B acked
+  assert.equal(u.count(), 0);
+});
+
+test("UnackedTracker: ignores an out-of-order older push", () => {
+  const u = new UnackedTracker();
+  u.posted1();
+  u.posted1();
+  u.push(2, 2);
+  u.push(1, 1);
+  assert.equal(u.count(), 2);
 });

@@ -27,16 +27,41 @@ type ToWorker =
 
 type FromWorker =
   | { op: "delivery"; delivery: Delivery }
-  | { op: "count"; n: number }
+  | { op: "count"; n: number; sendsSeen: number }
   | { op: "done"; id: number; value?: unknown; error?: string }
   | { op: "log"; event: LogEvent };
+
+/**
+ * Main-side unacked count, reconciled with the worker's pushes. A push says
+ * "n unacked after I processed sendsSeen sends"; sends main posted since then
+ * are still in flight to the worker, so they count too. Never overwrite with
+ * a stale push (that read 0 while a just-posted send was unacked).
+ */
+export class UnackedTracker {
+  private posted = 0;
+  private n = 0;
+  private seen = 0;
+  /** main posted a non-ack send */
+  posted1(): void {
+    this.posted++;
+  }
+  /** worker pushed { n, sendsSeen } */
+  push(n: number, sendsSeen: number): void {
+    if (sendsSeen < this.seen) return; // out-of-order guard (postMessage is FIFO, but be safe)
+    this.n = n;
+    this.seen = sendsSeen;
+  }
+  count(): number {
+    return this.n + (this.posted - this.seen);
+  }
+}
 
 export class WorkerComms implements Comms {
   readonly self: Endpoint;
   private readonly worker: Worker;
   private handler: ((d: Delivery) => void) | null = null;
   private readonly held: Delivery[] = [];
-  private count = 0;
+  private readonly unacked = new UnackedTracker();
   private nextId = 1;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
@@ -52,7 +77,7 @@ export class WorkerComms implements Comms {
           else this.held.push(m.delivery);
           break;
         case "count":
-          this.count = m.n;
+          this.unacked.push(m.n, m.sendsSeen);
           break;
         case "log":
           log(m.event);
@@ -66,15 +91,13 @@ export class WorkerComms implements Comms {
         }
       }
     });
-    this.worker.on("error", (e) => {
-      for (const p of this.pending.values()) p.reject(e);
-      this.pending.clear();
-    });
+    this.worker.on("error", (e) => this.rejectAll(e));
+    this.worker.on("exit", (code) => this.rejectAll(new Error(`comms worker exited (code ${code})`)));
   }
 
   send<T extends MessageType>(to: Endpoint, type: T, body: BodyByType[T], opts?: MakeOptions): Envelope {
     const msg = makeEnvelope(type, this.self, to, body, opts) as Envelope;
-    if (type !== "ack") this.count++; // the worker's push will confirm it
+    if (type !== "ack") this.unacked.posted1(); // in flight until a push covers it
     this.post({ op: "send", msg });
     return msg;
   }
@@ -89,7 +112,7 @@ export class WorkerComms implements Comms {
   }
 
   unackedCount(): number {
-    return this.count;
+    return this.unacked.count();
   }
 
   async finalPoll(graceMs: number): Promise<boolean> {
@@ -99,6 +122,11 @@ export class WorkerComms implements Comms {
   async stop(): Promise<void> {
     await this.call((id) => ({ op: "stop", id }));
     await this.worker.terminate();
+  }
+
+  private rejectAll(e: Error): void {
+    for (const p of this.pending.values()) p.reject(e);
+    this.pending.clear();
   }
 
   private post(m: ToWorker): void {
@@ -151,13 +179,15 @@ function runWorker(init: WorkerInit): void {
   const { queue, wake } = memoryPorts();
   const out = (m: FromWorker) => port.postMessage(m);
   const core = new CommsCore(init.self, queue, wake, (event) => out({ op: "log", event }), init.opts);
-  core.onCountChange = (n) => out({ op: "count", n });
+  let sendsSeen = 0;
+  core.onCountChange = (n) => out({ op: "count", n, sendsSeen });
   core.onMessage((delivery) => out({ op: "delivery", delivery }));
   core.start();
   port.on("message", async (m: ToWorker) => {
     try {
       switch (m.op) {
         case "send":
+          if (m.msg.type !== "ack") sendsSeen++; // before sendEnvelope, so its push covers this send
           core.sendEnvelope(m.msg);
           break;
         case "delete":
