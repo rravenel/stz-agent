@@ -580,3 +580,4 @@ Milestone values (the `**Milestone**` row; `project.json` groups by it):
 | `B2 — Prime harness` | B | 1:30–2:30 | REPL, agent loop, log, proxy, model adapters |
 | `B3 — Checkpoint and exit` | B | 2:30–3:15 | checkpoint/restore, exit checklist, continuation |
 | `B4 — Demo run` | B | 3:15–4:00 | success criteria with a real model and slow fetch |
+| `I1 — Build infrastructure` | I | (outside §10) | cross-track tooling: pinned toolchain and deps for `scripts/`. Branches `infra/NNNN-short-name`; pick with `scripts/next-issue.py I` |
