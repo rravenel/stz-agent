@@ -57,7 +57,7 @@ Bodies always go in S3. SQS messages carry IDs and S3 keys only.
 
 ### 4.1 Sync wake (Doorman → Prime, Prime → Com, Com → Prime)
 
-A sync wake is a `lambda:Invoke` call with `InvocationType: "RequestResponse"` and payload `{reason: "wake"}`. How it behaves:
+A sync wake is a `lambda:Invoke` call with `InvocationType: "RequestResponse"` and payload `{reason: "wake"}`. Doorman's `POST /wake` sends `{reason: "prewake"}` instead, with no message and no ack loop. Its only purpose is to pay Prime's Lambda cold start before the user's first message (spec §7). How it behaves:
 
 - **The Invoke call is an HTTPS request to the Lambda service.** Lambda checks concurrency *before* running anything. If the target is already at its limit of 1, Lambda rejects the call immediately with a **429**. Nothing is queued and nothing is retried. A wake to a running instance therefore can't pile up or fire later.
 - **Otherwise, Lambda runs the target**: a cold init if needed, then the handler. Lambda **sends the response only when the handler returns**. Prime's handler is its whole run (restore, drain messages, agent loop, checkpoint), so that can be minutes. Startup (loading the harness and compiling the WASM) is only the first part of it.
@@ -112,7 +112,7 @@ monitor tick (every 500 ms), per recipient with a non-empty unacked set:
 | Param | Start | Notes |
 |---|---|---|
 | `ACK_TIMEOUT` | 3 s | First wait, before any wake. Must exceed the recipient's poll interval. |
-| `WAKE_ACK_TIMEOUT` (Prime) | 15 s **[TBD: measure]** | Cold init + comms worker start. *Not* the state restore: Prime acks before it restores (§6). |
+| `WAKE_ACK_TIMEOUT` (Prime) | 15 s **[TBD: measure]** | Sized for a *cold* start (init + WASM compile + comms worker start). A warm start acks much sooner. It doesn't include the state restore, because Prime acks before it restores (§6). |
 | `WAKE_ACK_TIMEOUT` (Com) | 5 s **[TBD: measure]** | Small Node function |
 | `WAKE_CALL_TIMEOUT` | 2 s | Client-side abort on the Invoke call |
 
