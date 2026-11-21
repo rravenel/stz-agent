@@ -1,9 +1,12 @@
-// Stub doorman handler. Replaced by the real implementation (see issues/).
+// Doorman Lambda entry: HTTP API (payload v2) → route().
 
-export interface WakeEvent {
-  reason?: string;
-}
+import { depsFromEnv } from "./aws.ts";
+import { route, type Deps } from "./doorman.ts";
+import type { HttpEvent, HttpResponse } from "./http.ts";
 
-export async function handler(event: WakeEvent = {}): Promise<{ stub: string; reason: string | null }> {
-  return { stub: "doorman", reason: event.reason ?? null };
+let deps: Deps | null = null;
+
+export async function handler(event: HttpEvent): Promise<HttpResponse> {
+  deps ??= depsFromEnv();
+  return route(deps, event);
 }
