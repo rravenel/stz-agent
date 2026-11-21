@@ -61,7 +61,7 @@ A sync wake is a `lambda:Invoke` call with `InvocationType: "RequestResponse"` a
 
 - **The Invoke call is an HTTPS request to the Lambda service.** Lambda checks concurrency *before* running anything. If the target is already at its limit of 1, Lambda rejects the call immediately with a **429**. Nothing is queued and nothing is retried. A wake to a running instance therefore can't pile up or fire later.
 - **Otherwise, Lambda runs the target**: a cold init if needed, then the handler. Lambda **sends the response only when the handler returns**. Prime's handler is its whole run (restore, drain messages, agent loop, checkpoint), so that can be minutes. Startup (loading the harness and compiling the WASM) is only the first part of it.
-- **We don't wait for that.** The caller sets its own client-side timeout of `WAKE_CALL_TIMEOUT` (2 s **[TBD]**) on the call: an `abortSignal` on the SDK v3 `send()`, with `maxAttempts: 1` so the SDK doesn't retry 429s on its own. When the timeout fires, our side closes the connection. **This is something we implement, not something Lambda does.** Lambda doesn't cancel an invocation when the caller disconnects, so the target keeps running. **[VERIFY in spike S2.]**
+- **We don't wait for that.** The caller sets its own client-side timeout of `WAKE_CALL_TIMEOUT` (2 s **[TBD]**) on the call: an `abortSignal` on the SDK v3 `send()`, with `maxAttempts: 1` so the SDK doesn't retry 429s on its own. When the timeout fires, our side closes the connection. **This is something we implement, not something Lambda does.** Lambda doesn't cancel an invocation when the caller disconnects, so the target keeps running. *Verified in spike S2 (#0022, 2026-11-21): after a 2 s abort, the 10 s target wrote its marker 10.0 s after the call started; an immediate second sync call got `TooManyRequestsException` / `ReservedFunctionConcurrentInvocationLimitExceeded` (HTTP 429), classified `running`; an async self-invoke sent as the last action started 0.3–0.7 s after the parent finished. Stub (128 MB) round trip: cold ~1.7 s, warm ~0.09 s.*
 
 **The Invoke result is for logging only. It never confirms anything.**
 
@@ -112,7 +112,7 @@ monitor tick (every 500 ms), per recipient with a non-empty unacked set:
 | Param | Start | Notes |
 |---|---|---|
 | `ACK_TIMEOUT` | 3 s | First wait, before any wake. Must exceed the recipient's poll interval. |
-| `WAKE_ACK_TIMEOUT` (Prime) | 15 s **[TBD: measure]** | Sized for a *cold* start (init + WASM compile + comms worker start). A warm start acks much sooner. It doesn't include the state restore, because Prime acks before it restores (§6). |
+| `WAKE_ACK_TIMEOUT` (Prime) | 15 s **[TBD: measure on Prime]** (S2 stub: cold invoke ~1.7 s) | Sized for a *cold* start (init + WASM compile + comms worker start). A warm start acks much sooner. It doesn't include the state restore, because Prime acks before it restores (§6). |
 | `WAKE_ACK_TIMEOUT` (Com) | 5 s **[TBD: measure]** | Small Node function |
 | `WAKE_CALL_TIMEOUT` | 2 s | Client-side abort on the Invoke call |
 

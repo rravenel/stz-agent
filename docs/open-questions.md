@@ -24,10 +24,11 @@ When one is resolved, move the answer into spec.md or protocol.md and delete it 
 ## Risks: spike first (spec §10)
 
 1. **S1: QuickJS WASM snapshot/restore.** Candidates: quickjs-emscripten (sync build, **not** Asyncify), or a QuickJS WASI build run under Node's `WebAssembly`/WASI with our own minimal fs. The Emscripten JS glue keeps some state outside linear memory, such as the stack pointer and FS. That's the likely snag, and the reason a WASI build may be easier. Fallback: replay the logged evals.
-2. **S2: Lambda wake behaviour.**
-   - A sync invoke to a busy target returns 429 with reason `ReservedFunctionConcurrentInvocationLimitExceeded`.
-   - The target keeps running after the client aborts.
-   - The async self-wake lands within seconds of the instance exiting.
+2. **S2: Lambda wake behaviour.** Settled by #0022 (2026-11-21, two runs, all pass); results in `docs/protocol.md` §4.1.
+   - A sync invoke to a busy reserved-concurrency-1 target returns 429 `TooManyRequestsException`, reason `ReservedFunctionConcurrentInvocationLimitExceeded`.
+   - The target keeps running after the client aborts at 2 s (marker at 10.0 s).
+   - The async self-wake starts 0.3–0.7 s after the parent finishes.
+   - Stub cold invoke ~1.7 s, warm ~0.09 s. Both runs were cold, so idle environments were not kept between runs a few minutes apart (see "How long do idle environments stay warm?").
 
 ## Still open
 
