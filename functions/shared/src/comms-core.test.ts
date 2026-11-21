@@ -311,6 +311,60 @@ test("a failed send is logged and retried on the next tick", async () => {
   assert.equal(fq.pending("prime").length, 1);
 });
 
+// ---- acceptDeadlineAtMs (Com) -------------------------------------------
+
+function httpReq(timeout_s: number) {
+  return makeEnvelope("http.request", "prime", "com", {
+    request_id: `r-${timeout_s}`, method: "GET", url: "mock://slow", headers: {}, auth: "none", timeout_s, purpose: "repl",
+  });
+}
+
+function deadlineCom(fq: FakeQueue, log: LogEvent[], acceptDeadlineAtMs?: number) {
+  const opts = acceptDeadlineAtMs === undefined ? {} : { acceptDeadlineAtMs };
+  const c = new CommsCore("com", fq.port("com"), new FakeWake(), (e) => log.push(e), opts).start();
+  cores.push(c);
+  return c;
+}
+
+test("deadline: a request that doesn't fit is declined: no ack, no hand-off, stays queued", async () => {
+  const fq = new FakeQueue();
+  const log: LogEvent[] = [];
+  const got: Delivery[] = [];
+  deadlineCom(fq, log, 60_000).onMessage((d) => got.push(d));
+  const m = httpReq(120);
+  fq.push("com", JSON.stringify(m));
+  await advance(300);
+  assert.equal(got.length, 0);
+  assert.equal(fq.pending("prime").length, 0, "no ack");
+  assert.deepEqual(fq.pending("com").map((x) => x.msg_id), [m.msg_id]);
+  assert.deepEqual(log.filter((e) => e.kind === "declined"), [{ kind: "declined", msg_id: m.msg_id, reason: "deadline" }]);
+});
+
+test("deadline: a request that fits is acked and handed off", async () => {
+  const fq = new FakeQueue();
+  const got: Delivery[] = [];
+  deadlineCom(fq, [], 60_000).onMessage((d) => got.push(d));
+  fq.push("com", JSON.stringify(httpReq(30)));
+  await advance(300);
+  assert.equal(got.length, 1);
+  assert.equal(fq.pending("prime").filter((x) => x.type === "ack").length, 1);
+});
+
+test("deadline: unset accepts anything; set never applies to other types", async () => {
+  const fq = new FakeQueue();
+  const got: Delivery[] = [];
+  deadlineCom(fq, []).onMessage((d) => got.push(d));
+  fq.push("com", JSON.stringify(httpReq(100_000)));
+  await advance(300);
+  assert.equal(got.length, 1);
+  const fq2 = new FakeQueue();
+  const got2: Delivery[] = [];
+  deadlineCom(fq2, [], 1).onMessage((d) => got2.push(d));
+  fq2.push("com", JSON.stringify(makeEnvelope("user.message", "doorman", "com", { text: "x" })));
+  await advance(300);
+  assert.equal(got2.length, 1);
+});
+
 // ---- classifyInvoke ------------------------------------------------------
 
 test("classifyInvoke: abort → started, 429 → running, FunctionError → failed, other → error", () => {
