@@ -7,6 +7,7 @@
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import type { Comms, Delivery } from "./comms.ts";
+import { fromEnv } from "./aws-ports.ts";
 import { CommsCore, type CommsOptions, type LogEvent, type QueuePort, type WakePort } from "./comms-core.ts";
 import { makeEnvelope, type BodyByType, type Endpoint, type Envelope, type MakeOptions, type MessageType } from "./envelope.ts";
 
@@ -172,11 +173,7 @@ export function memoryPorts(): { queue: QueuePort; wake: WakePort } {
 
 function runWorker(init: WorkerInit): void {
   const port = parentPort!;
-  if (init.mode !== "memory") {
-    // TODO(#0005): SqsQueuePort / LambdaWakePort once the AWS SDK is installed.
-    throw new Error("comms worker: aws mode needs the AWS SDK ports (not yet installed)");
-  }
-  const { queue, wake } = memoryPorts();
+  const { queue, wake } = init.mode === "memory" ? memoryPorts() : fromEnv(init.self);
   const out = (m: FromWorker) => port.postMessage(m);
   const core = new CommsCore(init.self, queue, wake, (event) => out({ op: "log", event }), init.opts);
   let sendsSeen = 0;
