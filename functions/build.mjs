@@ -5,7 +5,7 @@ import { copyFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
-const functions = ["doorman", "prime", "com"];
+const functions = ["doorman", "prime", "com", "s2spike"];
 
 rmSync(`${root}dist`, { recursive: true, force: true });
 await Promise.all(

@@ -29,7 +29,15 @@ class StzAgentStack(Stack):
     CloudFormation dependency cycle.
     """
 
-    def __init__(self, scope: Construct, construct_id: str, *, api_token: str, **kwargs) -> None:
+    def __init__(
+        self,
+        scope: Construct,
+        construct_id: str,
+        *,
+        api_token: str,
+        spike_s2: bool = False,
+        **kwargs,
+    ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         names = {f: f"{self.stack_name}-{f}" for f in FUNCTIONS}
@@ -95,9 +103,19 @@ class StzAgentStack(Stack):
         }
 
         # --- Functions -----------------------------------------------------
-        def make_fn(key: str, memory: int, timeout: Duration, extra_env: dict) -> lambda_.Function:
-            name = names[key]
-            dist = ROOT / "functions" / "dist" / key
+        def make_fn(
+            key: str,
+            memory: int,
+            timeout: Duration,
+            extra_env: dict,
+            *,
+            name: str | None = None,
+            bundle: str | None = None,
+            reserved: int | None = 1,
+            env: dict | None = None,
+        ) -> lambda_.Function:
+            name = name or names[key]
+            dist = ROOT / "functions" / "dist" / (bundle or key)
             if not (dist / "index.mjs").exists():
                 raise FileNotFoundError(f"{dist}/index.mjs missing: run scripts/build.sh first")
             log_group = logs.LogGroup(
@@ -117,9 +135,9 @@ class StzAgentStack(Stack):
                 code=lambda_.Code.from_asset(str(dist)),
                 memory_size=memory,
                 timeout=timeout,
-                reserved_concurrent_executions=1,
+                reserved_concurrent_executions=reserved,
                 log_group=log_group,
-                environment={**common_env, **extra_env},
+                environment={**(common_env if env is None else env), **extra_env},
             )
 
         # Doorman: HTTP API integrations cap at 30 s.
@@ -151,6 +169,10 @@ class StzAgentStack(Stack):
         bucket.grant_read(doorman)
         secret.grant_read(com)
 
+        # --- Spike S2 (#0004): driver + target, not in demo --------------------
+        if spike_s2:
+            self._add_spike_s2(make_fn, bucket)
+
         # --- HTTP API ------------------------------------------------------
         api = apigwv2.HttpApi(self, "Api")
         integration = integrations.HttpLambdaIntegration("DoormanIntegration", doorman)
@@ -166,3 +188,47 @@ class StzAgentStack(Stack):
         CfnOutput(self, "BucketName", value=bucket.bucket_name)
         for key in FUNCTIONS:
             CfnOutput(self, f"{key.capitalize()}FunctionName", value=names[key])
+
+    def _add_spike_s2(self, make_fn, bucket: s3.Bucket) -> None:
+        """Driver runs the three wake checks against a reserved-concurrency-1 target."""
+
+        def arn(n: str) -> str:
+            return self.format_arn(
+                service="lambda",
+                resource="function",
+                resource_name=n,
+                arn_format=ArnFormat.COLON_RESOURCE_NAME,
+            )
+
+        target_name = f"{self.stack_name}-s2-target"
+        driver_name = f"{self.stack_name}-s2-driver"
+        env = {
+            "SPIKE_BUCKET": bucket.bucket_name,
+            "TARGET_FUNCTION_NAME": target_name,
+        }
+        target = make_fn(
+            "s2target",
+            128,
+            Duration.seconds(60),
+            {"SELF_FUNCTION_NAME": target_name},
+            name=target_name,
+            bundle="s2spike",
+            env=env,
+        )
+        driver = make_fn(
+            "s2driver",
+            128,
+            Duration.minutes(3),
+            {"SELF_FUNCTION_NAME": driver_name},
+            name=driver_name,
+            bundle="s2spike",
+            reserved=None,
+            env=env,
+        )
+        target.configure_async_invoke(max_event_age=Duration.seconds(60), retry_attempts=0)
+        for fn in (target, driver):
+            fn.add_to_role_policy(
+                iam.PolicyStatement(actions=["lambda:InvokeFunction"], resources=[arn(target_name)])
+            )
+            bucket.grant_read_write(fn, "spikes/s2/*")
+        CfnOutput(self, "S2DriverFunctionName", value=driver_name)

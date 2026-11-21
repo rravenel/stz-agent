@@ -229,3 +229,91 @@ def test_resolve_api_token(monkeypatch):
         resolve_api_token("rene", None)
     monkeypatch.setenv("STZ_API_TOKEN", "envtok")
     assert resolve_api_token("rene", None) == "envtok"
+
+
+# --- Spike S2 (#0004) ---------------------------------------------------
+
+S2 = {"s2-target": f"{STACK}-s2-target", "s2-driver": f"{STACK}-s2-driver"}
+
+
+@pytest.fixture(scope="module")
+def spike_template():
+    app = core.App()
+    stack = StzAgentStack(app, STACK, api_token="test-token", spike_s2=True)
+    return assertions.Template.from_stack(stack)
+
+
+def s2_fn(template, key):
+    found = template.find_resources(
+        "AWS::Lambda::Function", {"Properties": {"FunctionName": S2[key]}}
+    )
+    assert len(found) == 1, f"function {S2[key]} not found"
+    return next(iter(found.items()))
+
+
+def s2_invoke_resources(template, key):
+    _, fn = s2_fn(template, key)
+    role_ref = fn["Properties"]["Role"]["Fn::GetAtt"][0]
+    out = []
+    for pol in template.find_resources("AWS::IAM::Policy").values():
+        if {"Ref": role_ref} not in pol["Properties"]["Roles"]:
+            continue
+        for s in pol["Properties"]["PolicyDocument"]["Statement"]:
+            if "lambda:InvokeFunction" in as_list(s["Action"]):
+                out += [json.dumps(r) for r in as_list(s["Resource"])]
+    return out
+
+
+def test_spike_s2_absent_by_default(template):
+    for name in S2.values():
+        assert not template.find_resources(
+            "AWS::Lambda::Function", {"Properties": {"FunctionName": name}}
+        )
+    assert "S2DriverFunctionName" not in template.find_outputs("*")
+
+
+def test_spike_s2_functions(spike_template):
+    _, target = s2_fn(spike_template, "s2-target")
+    _, driver = s2_fn(spike_template, "s2-driver")
+    t, d = target["Properties"], driver["Properties"]
+    assert (t["MemorySize"], t["Timeout"], t["ReservedConcurrentExecutions"]) == (128, 60, 1)
+    assert (d["MemorySize"], d["Timeout"]) == (128, 180)
+    assert "ReservedConcurrentExecutions" not in d
+    for p in (t, d):
+        env = p["Environment"]["Variables"]
+        assert set(env) == {"SPIKE_BUCKET", "TARGET_FUNCTION_NAME", "SELF_FUNCTION_NAME"}
+        assert env["TARGET_FUNCTION_NAME"] == S2["s2-target"]
+    assert t["Environment"]["Variables"]["SELF_FUNCTION_NAME"] == S2["s2-target"]
+    assert "S2DriverFunctionName" in spike_template.find_outputs("*")
+
+
+def test_spike_s2_async_invoke_config(spike_template):
+    target_id, _ = s2_fn(spike_template, "s2-target")
+    spike_template.has_resource_properties(
+        "AWS::Lambda::EventInvokeConfig",
+        {"FunctionName": {"Ref": target_id}, "MaximumEventAgeInSeconds": 60, "MaximumRetryAttempts": 0},
+    )
+
+
+def test_spike_s2_invoke_permissions(spike_template):
+    for key in ("s2-target", "s2-driver"):
+        res = s2_invoke_resources(spike_template, key)
+        assert res and all(f':function:{S2["s2-target"]}"' in r for r in res), key
+
+
+def test_spike_s2_bucket_scoped(spike_template):
+    _, target = s2_fn(spike_template, "s2-target")
+    role_ref = target["Properties"]["Role"]["Fn::GetAtt"][0]
+    s3_res = []
+    for pol in spike_template.find_resources("AWS::IAM::Policy").values():
+        if {"Ref": role_ref} in pol["Properties"]["Roles"]:
+            for s in pol["Properties"]["PolicyDocument"]["Statement"]:
+                if any(a.startswith("s3:") for a in as_list(s["Action"])):
+                    s3_res += [json.dumps(r) for r in as_list(s["Resource"])]
+    assert any("spikes/s2/*" in r for r in s3_res)
+
+
+def test_spike_s2_keeps_core_tests(spike_template):
+    test_queue_permissions(spike_template)
+    test_only_com_reads_secret(spike_template)
+    test_invoke_permissions(spike_template)
