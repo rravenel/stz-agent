@@ -25,7 +25,8 @@ export type LogEvent =
   | { kind: "wake"; to: Endpoint; result: WakeResult }
   | { kind: "poison"; error: string }
   | { kind: "send-failed"; to: Endpoint; msg_id: string; error: string }
-  | { kind: "poll-failed"; error: string };
+  | { kind: "poll-failed"; error: string }
+  | { kind: "declined"; msg_id: string; reason: "deadline" };
 export type Logger = (event: LogEvent) => void;
 
 export interface CommsOptions {
@@ -33,6 +34,12 @@ export interface CommsOptions {
   wakeAckTimeoutMs: Record<Endpoint, number>;
   tickMs: number;
   pollWaitSeconds: number;
+  /**
+   * Com only (spec §6, protocol §8): an http.request whose timeout would end
+   * after this epoch-ms is left unacked, unhandled and undeleted, so it
+   * reappears for the next Com. Unset: every message is acked.
+   */
+  acceptDeadlineAtMs?: number;
 }
 
 export const DEFAULT_OPTIONS: CommsOptions = {
@@ -233,6 +240,11 @@ export class CommsCore implements Comms {
       if (this.monitor.ack(msg.body.acked_msg_id)) this.countChanged();
       await this.queue.delete(receipt).catch(() => {});
       return;
+    }
+    const deadline = this.opts.acceptDeadlineAtMs;
+    if (msg.type === "http.request" && deadline !== undefined && Date.now() + msg.body.timeout_s * 1000 > deadline) {
+      this.log({ kind: "declined", msg_id: msg.msg_id, reason: "deadline" });
+      return; // not counted as arrived: finalPoll may still report empty
     }
     this.arrived++;
     await this.enqueue(makeAck(msg)); // ack first: "I'm awake and I have it"
