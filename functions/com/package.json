@@ -1,5 +1,8 @@
 {
   "name": "@stz/com",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@smithy/signature-v4": "^5.7.5"
+  }
 }
