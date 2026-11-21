@@ -344,6 +344,11 @@ export class Repl {
     return JSON.parse(this.q.eval(`JSON.stringify(Object.keys(__evals))`, "<evals>")) as string[];
   }
 
+  /** True while control is inside QuickJS (an eval or a host call). */
+  get busy(): boolean {
+    return this.q.busy;
+  }
+
   /** The REPL's whole state. Only valid between calls (never from inside onFetch). */
   snapshot(): Uint8Array {
     return this.q.snapshot();

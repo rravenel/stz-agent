@@ -66,25 +66,37 @@ export async function syncUp(store: ObjectStore, dir: string, manifest: Manifest
   return { uploaded, deleted, skipped };
 }
 
+export interface SyncDownResult {
+  manifest: Manifest;
+  /** Keys that couldn't be restored (malformed, or clashing with a directory), with why. */
+  skipped: { key: string; reason: string }[];
+}
+
 /**
  * Replace dir's contents with S3 workspace/. Emptying it first means a warm
- * container can't carry a stale file or link from an earlier run. Returns the
- * manifest of what was downloaded.
+ * container can't carry a stale file or link from an earlier run. A bad key
+ * is skipped and reported, never fatal: one odd object must not stop every
+ * Prime start (#0015 review).
  */
-export async function syncDown(store: ObjectStore, dir: string): Promise<Manifest> {
+export async function syncDown(store: ObjectStore, dir: string): Promise<SyncDownResult> {
   if (!dir || dir === "/" || dir === sep) throw new Error(`refusing to use ${JSON.stringify(dir)} as the workspace`);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   const manifest: Manifest = new Map();
+  const skipped: SyncDownResult["skipped"] = [];
   for (const key of await store.list(WORKSPACE_PREFIX)) {
     const rel = key.slice(WORKSPACE_PREFIX.length);
-    workspaceKey(rel); // throws on "", ".", ".." segments or an absolute path
-    const body = await store.get(key);
-    if (!body) continue;
-    const p = join(dir, ...rel.split("/"));
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, body, { flag: "wx" }); // fresh dir: never follows or overwrites anything
-    manifest.set(rel, sha(body));
+    try {
+      workspaceKey(rel); // throws on "", ".", ".." segments or an absolute path
+      const body = await store.get(key);
+      if (!body) continue;
+      const p = join(dir, ...rel.split("/"));
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, body, { flag: "wx" }); // fresh dir: never follows or overwrites anything
+      manifest.set(rel, sha(body));
+    } catch (e) {
+      skipped.push({ key, reason: e instanceof Error ? e.message : String(e) });
+    }
   }
-  return manifest;
+  return { manifest, skipped };
 }

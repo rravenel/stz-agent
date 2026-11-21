@@ -39,8 +39,9 @@ export class LogWriter {
    */
   async append(kind: LogKind, fields: LogFields | ((seq: number) => LogFields) = {}): Promise<LogEvent> {
     const wanted = this.next;
+    this.realConflict = false;
     const ev = await this.write(kind, fields);
-    if (ev.seq !== wanted) {
+    if (ev.seq !== wanted && this.realConflict) {
       await this.write("lifecycle", { body: { event: "seq_conflict" satisfies LifecycleEvent, wanted, got: ev.seq } });
     }
     return ev;
@@ -48,6 +49,25 @@ export class LogWriter {
 
   lifecycle(event: LifecycleEvent, extra: Record<string, unknown> = {}): Promise<LogEvent> {
     return this.append("lifecycle", { body: { event, ...extra } });
+  }
+
+  /** Set when a write skipped a seq held by anything other than a stale-wake event. */
+  private realConflict = false;
+
+  /**
+   * A stale wake logs one event at the checkpoint's next_seq without
+   * checkpointing, so the next run finds that seq taken. That's expected,
+   * not a crash: don't report it as seq_conflict.
+   */
+  private async isStaleWake(seq: number): Promise<boolean> {
+    const b = await this.store.get(logKey(seq));
+    if (!b) return false;
+    try {
+      const ev = JSON.parse(new TextDecoder().decode(b)) as LogEvent;
+      return ev.kind === "lifecycle" && (ev.body as { event?: string } | undefined)?.event === "stale_wake";
+    } catch {
+      return false;
+    }
   }
 
   private async write(kind: LogKind, fieldsOf: LogFields | ((seq: number) => LogFields)): Promise<LogEvent> {
@@ -59,6 +79,7 @@ export class LogWriter {
       if (fields.body !== undefined) ev.body = fields.body;
       if (fields.body_ref !== undefined) ev.body_ref = fields.body_ref;
       const ok = await this.store.putIfAbsent(logKey(this.next), JSON.stringify(ev));
+      if (!ok && !(await this.isStaleWake(this.next))) this.realConflict = true;
       this.next++;
       if (ok) {
         this.written.push(ev);

@@ -142,13 +142,16 @@ test("workspace sync: changed files only, deletes carry over, symlinks never upl
 
   // Down: plain files only, in a fresh directory.
   const down = join(base, "restored");
-  const m = await syncDown(store, down);
+  const { manifest: m } = await syncDown(store, down);
   assert.deepEqual([...m.keys()], ["a.txt"]);
   assert.ok(lstatSync(join(down, "a.txt")).isFile());
 
-  // A key that would escape the workspace is refused.
+  // A key that would escape the workspace is skipped and reported, never written (#0016: not fatal).
   await store.put("workspace/../escape.txt", "x");
-  await assert.rejects(syncDown(store, join(base, "again")), /bad workspace path/);
+  const again = await syncDown(store, join(base, "again"));
+  assert.deepEqual([...again.manifest.keys()], ["a.txt"]);
+  assert.equal(again.skipped.length, 1);
+  assert.match(again.skipped[0]!.reason, /bad workspace path/);
   assert.equal(existsSync(join(base, "escape.txt")), false);
 });
 
@@ -158,7 +161,7 @@ test("stale pending requests fail as lost: a REPL fetch rejects into the tool re
   const f1 = await pendingFetchWithFile(w);
   void f1; // Com died: this fetch is never answered.
   clock += (600 + 61) * 1000;
-  await w.run();
+  await w.run("continue"); // woken with no message (a continuation): stale requests are still checked
   let st = await w.state();
   assert.deepEqual(st.open_tool_calls, []);
   const ctx = st.model_context as Message[];
@@ -171,7 +174,7 @@ test("stale pending requests fail as lost: a REPL fetch rejects into the tool re
   const [m2] = await w.takeRequests();
   assert.equal(m2!.body.purpose, "model");
   clock += (600 + 61) * 1000;
-  await w.run();
+  await w.run("continue");
   st = await w.state();
   assert.deepEqual(st.pending_requests, {});
   const last = (st.model_context as Message[]).at(-1)!;
@@ -185,7 +188,7 @@ test("a request younger than its timeout is left alone", async () => {
   const w = new World({ now: () => new Date(clock) });
   await pendingFetchWithFile(w);
   clock += 600 * 1000;
-  await w.run();
+  await w.run("continue");
   assert.equal(Object.keys((await w.state()).pending_requests).length, 1);
 });
 

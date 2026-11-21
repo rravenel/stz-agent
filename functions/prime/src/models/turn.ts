@@ -30,6 +30,11 @@ export type Block = TextBlock | ToolCallBlock | ToolResultBlock;
 export interface Message {
   role: "user" | "assistant";
   content: Block[];
+  /**
+   * Harness-only: a user message that arrived while a model call was in
+   * flight. The reply to that call goes before it. Adapters ignore it.
+   */
+  queued?: boolean;
 }
 
 export interface ModelRequest {

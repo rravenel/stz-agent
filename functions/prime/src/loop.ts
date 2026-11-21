@@ -120,7 +120,8 @@ export class Harness {
       await this.clear(msg.msg_id);
       return;
     }
-    this.context.push({ role: "user", content: [{ type: "text", text: msg.body.text }] });
+    // Mid-call: the model hasn't seen this one; its reply must go before it.
+    this.context.push({ role: "user", content: [{ type: "text", text: msg.body.text }], ...(this.modelPending() ? { queued: true } : {}) });
   }
 
   /** /clear: new conversation. The REPL and the workspace carry over (spec §4). */
@@ -166,14 +167,14 @@ export class Harness {
       await log.append("error", { corr_id: res.requestId, body: { where: "model.response", message } });
       // End the turn visibly. Without an assistant message the context would
       // still end with the user's turn and be retried forever.
-      this.context.push({ role: "assistant", content: [{ type: "text", text: `[harness: the model call failed: ${message}]` }] });
+      this.addReply({ role: "assistant", content: [{ type: "text", text: `[harness: the model call failed: ${message}]` }] });
       return;
     }
     await log.append("model.response", {
       corr_id: res.requestId,
       body: { stop: reply.stop, usage: reply.usage, content: reply.content },
     });
-    this.context.push({ role: "assistant", content: reply.content });
+    this.addReply({ role: "assistant", content: reply.content });
     for (const call of reply.content) if (call.type === "tool_call") await this.runTool(call);
     await this.flushFetches();
   }
@@ -198,6 +199,18 @@ export class Harness {
       else await this.onReplResponse(res);
     }
     return lost;
+  }
+
+  /**
+   * Put a model reply where it belongs: right after what the model was sent,
+   * before user messages that arrived while the call was in flight.
+   */
+  private addReply(reply: Message): void {
+    const ctx = this.context;
+    const at = ctx.findIndex((m) => m.queued);
+    if (at < 0) ctx.push(reply);
+    else ctx.splice(at, 0, reply);
+    for (const m of ctx) delete m.queued;
   }
 
   // ------------------------------------------------------------ tools

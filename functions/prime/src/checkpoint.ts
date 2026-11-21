@@ -2,8 +2,15 @@
 //
 // Write order: ckpt-<n>/state.json, ckpt-<n>/repl.bin, the workspace sync,
 // then latest.json. latest.json is the commit point: a failure anywhere
-// before it throws, and the previous checkpoint stays in effect. Held SQS
-// messages are deleted only after this returns (handler.ts).
+// before it throws, and the previous checkpoint's state and REPL stay in
+// effect. Held SQS messages are deleted only after this returns (handler.ts).
+//
+// The workspace is NOT versioned per checkpoint: workspace/ is one shared
+// prefix, as spec §5.4 lays it out. A crash after the sync but before
+// latest.json restores the previous state and REPL alongside the newer
+// workspace (files written or deleted by the lost run). Redone evals mostly
+// rewrite the same files, which is acceptable for v0 (decision in #0016);
+// versioning workspace keys per checkpoint is the fix if it ever matters.
 
 import { checkpointReplKey, checkpointStateKey, LATEST_CHECKPOINT_KEY } from "../../shared/src/s3-keys.ts";
 import { initialState, type LatestCheckpoint, type PrimeState } from "../../shared/src/state.ts";
@@ -28,6 +35,15 @@ export interface Loaded {
   workspace: WorkspaceMirror;
   /** False on the very first run (no checkpoint yet). */
   restored: boolean;
+  /** workspace/ keys the restore skipped, with why. */
+  workspaceSkipped: { key: string; reason: string }[];
+}
+
+/** Just the saved state (no REPL, no workspace): enough for a stale wake to log at the right seq. */
+export async function peekState(store: ObjectStore): Promise<PrimeState> {
+  const latest = await getJSON<LatestCheckpoint>(store, LATEST_CHECKPOINT_KEY);
+  if (!latest) return initialState();
+  return (await getJSON<PrimeState>(store, checkpointStateKey(latest.n))) ?? initialState();
 }
 
 export async function loadCheckpoint(store: ObjectStore, replOptions: ReplOptions): Promise<Loaded> {
@@ -42,9 +58,9 @@ export async function loadCheckpoint(store: ObjectStore, replOptions: ReplOption
     state = s;
   }
   // The workspace first: the REPL's fs binds to the directory as it is.
-  const manifest = await syncDown(store, dir);
+  const { manifest, skipped } = await syncDown(store, dir);
   const repl = snap ? await Repl.restore(snap, replOptions) : await Repl.create(replOptions);
-  return { state, repl, workspace: { dir, manifest }, restored: latest !== null };
+  return { state, repl, workspace: { dir, manifest }, restored: latest !== null, workspaceSkipped: skipped };
 }
 
 export interface SaveResult {

@@ -28,6 +28,10 @@ export interface WorldOptions {
   /** Wrap each run's comms (recording deletes). */
   wrapComms?: (c: Comms) => Comms;
   now?: () => Date;
+  /** A live Com acks Prime's requests during runs (default). Off: nothing acks until the test acts as Com. */
+  comAcks?: boolean;
+  /** Extra handler deps (deadlines, selfWake …). */
+  deps?: Partial<import("./handler.ts").PrimeDeps>;
 }
 
 export class World {
@@ -37,9 +41,12 @@ export class World {
   private readonly client = this.bus.connect("doorman");
   private runs = 0;
   readonly handler;
+  private readonly comAcks: boolean;
 
   constructor(opts: WorldOptions = {}) {
     this.client.onMessage(() => {}); // acks from Prime
+    this.comAcks = opts.comAcks ?? true;
+    this.startAcker();
     this.handler = createHandler({
       comms: () => {
         const c = this.bus.connect("prime");
@@ -49,8 +56,17 @@ export class World {
       adapter,
       replOptions: { workspaceDir: this.workspaceDir },
       idleGraceMs: 5,
+      staleWakeMs: 50,
+      ackPollMs: 2,
       ...(opts.now ? { now: opts.now } : {}),
+      ...opts.deps,
     });
+  }
+
+  /** A passive Com: its worker acks every http.request but leaves it queued for takeRequests(). */
+  startAcker() {
+    if (!this.comAcks) return;
+    this.bus.connect("com").onMessage(() => {});
   }
 
   say(text: string, msgId: string) {
@@ -71,6 +87,7 @@ export class World {
     });
     await new Promise((r) => setImmediate(r));
     await com.stop();
+    this.startAcker();
     return got;
   }
 
@@ -91,6 +108,7 @@ export class World {
       elapsed_ms: 5,
     });
     await com.stop();
+    this.startAcker();
   }
 
   async log(): Promise<LogEvent[]> {
