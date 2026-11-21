@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-/** x86_64, us-west-2. */
+/** x86_64, us-west-2 list price. */
 export const DEFAULT_PRICE_PER_GB_SECOND = 0.0000166667;
 export const DEFAULT_PRICE_PER_REQUEST = 0.2 / 1_000_000;
 export const DEFAULT_PRIME_MEMORY_MB = 2048;
@@ -152,14 +152,15 @@ export interface CliOptions {
   startMs: number;
   endMs: number;
   profile?: string;
-  region: string;
+  /** Unset: the AWS CLI resolves it (AWS_REGION, AWS_DEFAULT_REGION, profile). */
+  region?: string;
   logGroupPrefix: string;
   pricePerGbSecond: number;
   help: boolean;
 }
 
 export const USAGE = `Usage: node scripts/cost-report.ts --env <name> (--since 30m | --start ISO --end ISO)
-  [--profile stz-dev] [--region us-west-2] [--log-group-prefix /aws/lambda/StzAgent-<env>-]
+  [--profile stz-dev] [--region R (default: AWS_REGION / profile)] [--log-group-prefix /aws/lambda/StzAgent-<env>-]
   [--price-gb-s ${DEFAULT_PRICE_PER_GB_SECOND}]`;
 
 export function parseCli(argv: string[], nowMs = Date.now()): CliOptions {
@@ -171,7 +172,7 @@ export function parseCli(argv: string[], nowMs = Date.now()): CliOptions {
       start: { type: "string" },
       end: { type: "string" },
       profile: { type: "string" },
-      region: { type: "string", default: "us-west-2" },
+      region: { type: "string" },
       "log-group-prefix": { type: "string" },
       "price-gb-s": { type: "string" },
       help: { type: "boolean", short: "h", default: false },
@@ -200,20 +201,27 @@ export function parseCli(argv: string[], nowMs = Date.now()): CliOptions {
     env,
     startMs,
     endMs,
-    region: values.region ?? "us-west-2",
     logGroupPrefix: values["log-group-prefix"] ?? `/aws/lambda/StzAgent-${env}-`,
     pricePerGbSecond: price,
     help,
   };
   if (values.profile) opts.profile = values.profile;
+  if (values.region) opts.region = values.region;
   return opts;
 }
 
-function fetchReports(group: string, o: CliOptions): Promise<ReportLine[]> {
+/** The `aws` CLI arguments for one log group. No --region unless given. */
+export function logsArgs(group: string, o: Pick<CliOptions, "startMs" | "endMs" | "profile" | "region">): string[] {
   const args = ["logs", "filter-log-events", "--log-group-name", group,
     "--start-time", String(o.startMs), "--end-time", String(o.endMs),
-    "--filter-pattern", '"REPORT RequestId"', "--output", "json", "--region", o.region];
+    "--filter-pattern", '"REPORT RequestId"', "--output", "json"];
+  if (o.region) args.push("--region", o.region);
   if (o.profile) args.push("--profile", o.profile);
+  return args;
+}
+
+function fetchReports(group: string, o: CliOptions): Promise<ReportLine[]> {
+  const args = logsArgs(group, o);
   return new Promise((resolve, reject) => {
     execFile("aws", args, { maxBuffer: 256 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {

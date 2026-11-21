@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatTable, parseCli, parseReport, parseSince, summarize, type ReportLine } from "./cost-report.ts";
+import { formatTable, logsArgs, parseCli, parseReport, parseSince, summarize, type ReportLine } from "./cost-report.ts";
 
 const OPTS = { pricePerGbSecond: 0.0000166667, pricePerRequest: 0.2 / 1_000_000, primeMemoryMb: 2048 };
 
@@ -94,4 +94,16 @@ test("formatTable: rows for each function and totals", () => {
   for (const w of ["doorman", "prime", "com", "total", "counterfactual", "cost ratio", "requested window"]) {
     assert.match(t, new RegExp(w));
   }
+});
+
+test("region: omitted unless --region is given; --profile passed through", () => {
+  const o = parseCli(["--env", "x", "--since", "5m", "--profile", "stz-dev"], 1_000_000);
+  assert.equal(o.region, undefined);
+  const a = logsArgs("/aws/lambda/g", o);
+  assert.ok(!a.includes("--region"));
+  assert.deepEqual(a.slice(-2), ["--profile", "stz-dev"]);
+  const e = logsArgs("/aws/lambda/g", parseCli(["--env", "x", "--since", "5m", "--region", "eu-west-1"], 1_000_000));
+  const i = e.indexOf("--region");
+  assert.deepEqual(e.slice(i, i + 2), ["--region", "eu-west-1"]);
+  assert.ok(!e.includes("--profile"));
 });
