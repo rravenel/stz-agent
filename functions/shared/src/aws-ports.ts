@@ -1,11 +1,82 @@
 // AWS adapters for the comms ports (protocol §4.1, §6).
 //
-// TODO(#0005): SqsQueuePort, LambdaWakePort and fromEnv() need
-// @aws-sdk/client-sqs and @aws-sdk/client-lambda, which aren't installed yet
-// (see issues/0005.md, Prerequisites). Until then only the pure classifier
-// ships, so it can be tested without the SDK.
+// SqsQueuePort / LambdaWakePort wrap the SDK; classifyInvoke stays pure so it
+// is testable without AWS.
 
-import type { WakeResult } from "./comms-core.ts";
+import { DeleteMessageCommand, ReceiveMessageCommand, SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
+import type { QueuePort, WakePort, WakeResult } from "./comms-core.ts";
+import type { Endpoint, Envelope } from "./envelope.ts";
+
+export class SqsQueuePort implements QueuePort {
+  private readonly client: SQSClient;
+  private readonly urls: Record<Endpoint, string>;
+  private readonly self: Endpoint;
+  constructor(urls: Record<Endpoint, string>, self: Endpoint, client?: SQSClient) {
+    this.urls = urls;
+    this.self = self;
+    this.client = client ?? new SQSClient({});
+  }
+
+  async receive(waitSeconds: number): Promise<{ body: string; receipt: string }[]> {
+    const r = await this.client.send(
+      new ReceiveMessageCommand({ QueueUrl: this.urls[this.self], WaitTimeSeconds: waitSeconds, MaxNumberOfMessages: 10 }),
+    );
+    return (r.Messages ?? []).flatMap((m) => (m.ReceiptHandle ? [{ body: m.Body ?? "", receipt: m.ReceiptHandle }] : []));
+  }
+
+  async send(to: Endpoint, msg: Envelope): Promise<void> {
+    await this.client.send(new SendMessageCommand({ QueueUrl: this.urls[to], MessageBody: JSON.stringify(msg) }));
+  }
+
+  async delete(receipt: string): Promise<void> {
+    await this.client.send(new DeleteMessageCommand({ QueueUrl: this.urls[this.self], ReceiptHandle: receipt }));
+  }
+}
+
+export class LambdaWakePort implements WakePort {
+  private readonly client: LambdaClient;
+  private readonly names: Record<Endpoint, string>;
+  private readonly callTimeoutMs: number;
+  constructor(names: Record<Endpoint, string>, callTimeoutMs = 2000, client?: LambdaClient) {
+    this.names = names;
+    this.callTimeoutMs = callTimeoutMs;
+    this.client = client ?? new LambdaClient({ maxAttempts: 1 });
+  }
+
+  async wake(to: Endpoint): Promise<WakeResult> {
+    try {
+      const r = await this.client.send(
+        new InvokeCommand({
+          FunctionName: this.names[to],
+          InvocationType: "RequestResponse",
+          Payload: new TextEncoder().encode(JSON.stringify({ reason: "wake" })),
+        }),
+        { abortSignal: AbortSignal.timeout(this.callTimeoutMs) },
+      );
+      return classifyInvoke({ ok: true, StatusCode: r.StatusCode, FunctionError: r.FunctionError });
+    } catch (error) {
+      return classifyInvoke({ ok: false, error });
+    }
+  }
+}
+
+function need(env: NodeJS.ProcessEnv, k: string): string {
+  const v = env[k];
+  if (!v) throw new Error(`comms: missing env ${k}`);
+  return v;
+}
+
+/** Build the AWS ports from the env vars set by the stack (#0003). */
+export function fromEnv(self: Endpoint, env: NodeJS.ProcessEnv = process.env): { queue: SqsQueuePort; wake: LambdaWakePort } {
+  const urls = { doorman: need(env, "DOORMAN_QUEUE_URL"), prime: need(env, "PRIME_QUEUE_URL"), com: need(env, "COM_QUEUE_URL") };
+  const names = {
+    doorman: need(env, "DOORMAN_FUNCTION_NAME"),
+    prime: need(env, "PRIME_FUNCTION_NAME"),
+    com: need(env, "COM_FUNCTION_NAME"),
+  };
+  return { queue: new SqsQueuePort(urls, self), wake: new LambdaWakePort(names) };
+}
 
 /** The parts of a Lambda Invoke result or error the classifier looks at. */
 export type InvokeOutcome =
