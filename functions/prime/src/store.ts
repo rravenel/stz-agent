@@ -10,6 +10,8 @@ export interface ObjectStore {
   putIfAbsent(key: string, body: Uint8Array | string): Promise<boolean>;
   /** Keys under a prefix, sorted. */
   list(prefix: string): Promise<string[]>;
+  /** Remove a key (no error if absent). */
+  delete(key: string): Promise<void>;
 }
 
 const enc = new TextEncoder();
@@ -36,6 +38,10 @@ export class MemoryStore implements ObjectStore {
 
   async list(prefix: string): Promise<string[]> {
     return [...this.objects.keys()].filter((k) => k.startsWith(prefix)).sort();
+  }
+
+  async delete(key: string): Promise<void> {
+    this.objects.delete(key);
   }
 }
 

@@ -131,6 +131,8 @@ const PRELUDE = String.raw`
   };
 
   const finish = (id, r) => {
+    // A discarded eval (its conversation was cleared) leaves nothing behind.
+    if (__evals[id]?.discarded) { delete __evals[id]; return; }
     r.status = "done";
     r.stdout = __io.stdout; r.stderr = __io.stderr;
     __io.stdout = ""; __io.stderr = ""; __io.cut = false;
@@ -145,6 +147,12 @@ const PRELUDE = String.raw`
   };
   // Host-side failure recording (e.g. the CPU limit killed the handlers).
   g.__failEval = (id, error) => { if (__evals[id]?.status === "pending") finish(id, { error }); };
+  // Host: forget an eval. A pending one is dropped when it settles.
+  g.__discardEval = (id) => {
+    const e = __evals[id];
+    if (!e) return;
+    if (e.status === "pending") e.discarded = true; else delete __evals[id];
+  };
   g.fs = {
     readFile: (p) => hostFs("read", String(p)),
     writeFile: (p, data) => { hostFs("write", String(p), String(data)); },
@@ -319,8 +327,26 @@ export class Repl {
   /** Ids of evals still waiting on fetches. */
   pendingEvals(): string[] {
     return JSON.parse(
-      this.q.eval(`JSON.stringify(Object.keys(__evals).filter((k) => __evals[k].status === "pending"))`, "<pending>"),
+      this.q.eval(`JSON.stringify(Object.keys(__evals).filter((k) => __evals[k].status === "pending" && !__evals[k].discarded))`, "<pending>"),
     ) as string[];
+  }
+
+  /**
+   * Forget an eval: a settled result is deleted now, a pending one when it
+   * settles. Its fetches still complete (the REPL holds their resolvers).
+   */
+  discard(toolCallId: string): void {
+    this.q.eval(`__discardEval(${lit(toolCallId)})`, "<discard>");
+  }
+
+  /** Every eval id the REPL still holds, discarded ones included (for tests and leak checks). */
+  evalIds(): string[] {
+    return JSON.parse(this.q.eval(`JSON.stringify(Object.keys(__evals))`, "<evals>")) as string[];
+  }
+
+  /** True while control is inside QuickJS (an eval or a host call). */
+  get busy(): boolean {
+    return this.q.busy;
   }
 
   /** The REPL's whole state. Only valid between calls (never from inside onFetch). */
