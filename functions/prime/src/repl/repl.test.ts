@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Repl, type FetchRequest, type ReplOptions } from "./repl.ts";
@@ -129,6 +129,18 @@ test("fs: /workspace maps to the workspace dir; text round-trips; paths cannot e
   assert.match(missing.error, /ENOENT.*'\/workspace\/nope'/);
   assert.doesNotMatch(missing.error, new RegExp(workspaceDir));
   assert.match((repl.eval("t4", `fs.rm("/workspace")`) as { error: string }).error, /refusing/);
+});
+
+test("fs: a dangling symlink pointing outside can't be written through (#0012 review)", async () => {
+  const { repl, workspaceDir } = await make();
+  const outside = join(workspaceDir, "..", "created-outside.txt");
+  symlinkSync(outside, join(workspaceDir, "dangling"));
+  symlinkSync(join(workspaceDir, ".."), join(workspaceDir, "up"));
+  for (const code of [`fs.writeFile("dangling", "x")`, `fs.appendFile("dangling", "x")`, `fs.writeFile("up/created-outside.txt", "x")`]) {
+    const r = repl.eval("t1", code) as { error?: string };
+    assert.match(r.error ?? "", /outside \/workspace \(symlink\)/, code);
+  }
+  assert.equal(existsSync(outside), false, "nothing was created outside the workspace");
 });
 
 test("large file contents round-trip through fs (multi-MB host-call arguments)", async () => {

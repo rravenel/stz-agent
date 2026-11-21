@@ -71,12 +71,15 @@ export class ModelResponseError extends Error {
 export const REPL_TOOL = {
   name: "repl",
   description:
-    "Run JavaScript in a persistent QuickJS REPL. State (variables, functions) persists between calls. " +
-    "Use `await fetch(url)` for HTTP and the /workspace directory for files. There are no timers. " +
-    "Returns {value, stdout, stderr, error}.",
+    "Run JavaScript in a persistent QuickJS REPL. Your code runs as the body of an async function: use `return` " +
+    "to return a value and `await` freely. Declarations (const, let, function) are local to one call; to keep " +
+    "something for later calls, put it on globalThis (e.g. `globalThis.data = ...`). " +
+    "Use `await fetch(url, {method, headers, body})` for HTTP (res.status, res.ok, await res.text(), await res.json()), " +
+    "and the `fs` global for files under /workspace (fs.readFile, writeFile, appendFile, readdir, mkdir, rm, exists, stat; " +
+    "UTF-8 text). console.log goes to stdout. There are no timers. Returns {value, stdout, stderr, error}.",
   input_schema: {
     type: "object",
-    properties: { code: { type: "string", description: "JavaScript to run. The value of the last expression is returned." } },
+    properties: { code: { type: "string", description: "JavaScript to run, as the body of an async function. Use return to return a value." } },
     required: ["code"],
   },
 } as const;

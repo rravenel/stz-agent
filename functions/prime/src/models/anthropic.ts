@@ -46,7 +46,10 @@ export function anthropicAdapter(opts: AnthropicOptions): ModelAdapter {
         model: opts.model,
         max_tokens: req.max_tokens,
         ...(req.system ? { system: req.system } : {}),
-        messages: req.messages.map((m) => ({ role: m.role, content: m.content.map(toWire) })),
+        // Anthropic rejects empty text blocks and messages with no content (#0014 review).
+        messages: req.messages
+          .map((m) => ({ role: m.role, content: m.content.filter((b) => b.type !== "text" || b.text.trim() !== "").map(toWire) }))
+          .filter((m) => m.content.length > 0),
         tools: [{ name: REPL_TOOL.name, description: REPL_TOOL.description, input_schema: REPL_TOOL.input_schema }],
       };
       return {

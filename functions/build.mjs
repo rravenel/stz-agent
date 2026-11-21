@@ -1,7 +1,7 @@
 // Bundle each Lambda into functions/dist/<name>/index.mjs for the CDK stack
 // (lambda.Code.from_asset("functions/dist/<name>")). Quiet on success.
 import { build } from "esbuild";
-import { rmSync } from "node:fs";
+import { copyFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
@@ -28,3 +28,6 @@ await Promise.all(
     }),
   ),
 );
+
+// Prime loads the pinned QuickJS build from next to its bundle (prime/src/repl/wasm.ts).
+copyFileSync(`${root}prime/vendor/qjs-wasi-reactor.wasm`, `${root}dist/prime/qjs-wasi-reactor.wasm`);

@@ -18,6 +18,12 @@ export interface OpenAIOptions {
   model: string;
   /** e.g. https://api.openai.com/v1 or http://localhost:11434/v1 */
   baseUrl: string;
+  /**
+   * Name of the output-limit field. OpenAI's own API wants
+   * "max_completion_tokens" for newer models; most compatible servers take
+   * "max_tokens" (the default).
+   */
+  maxTokensField?: "max_tokens" | "max_completion_tokens";
 }
 
 /** One internal message can become several wire messages (each tool result is its own "tool" message). */
@@ -46,7 +52,7 @@ export function openaiAdapter(opts: OpenAIOptions): ModelAdapter {
       const messages = [...(req.system ? [{ role: "system", content: req.system }] : []), ...req.messages.flatMap(toWire)];
       const body = {
         model: opts.model,
-        max_tokens: req.max_tokens,
+        [opts.maxTokensField ?? "max_tokens"]: req.max_tokens,
         messages,
         tools: [{ type: "function", function: { name: REPL_TOOL.name, description: REPL_TOOL.description, parameters: REPL_TOOL.input_schema } }],
       };
