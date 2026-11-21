@@ -69,6 +69,8 @@ export async function applyAuth(
     }
     case "bedrock":
       // SigV4 over the exact body Com sends; credentials from the execution role.
-      return { ...headers, ...(await signer.sign({ method: req.method, url: req.url, headers, body })) };
+      // The signer's headers alone: they hold every request header lower-cased, so
+      // merging with `headers` would send e.g. Content-Type twice and break the signature.
+      return signer.sign({ method: req.method, url: req.url, headers, body });
   }
 }
