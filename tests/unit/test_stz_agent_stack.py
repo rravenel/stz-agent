@@ -358,3 +358,23 @@ def test_model_config_passes_through():
 def test_invalid_model_provider_raises():
     with pytest.raises(ValueError, match="model_provider"):
         StzAgentStack(core.App(), STACK, api_token="t", model_provider="gemini")
+
+
+# --- Bedrock (#0025) ------------------------------------------------------
+
+BEDROCK_ACTIONS = {"bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"}
+
+
+def bedrock_statements(template, key):
+    return [s for s in role_statements(template, key) if BEDROCK_ACTIONS & set(as_list(s["Action"]))]
+
+
+def test_only_com_invokes_bedrock(template):
+    (stmt,) = bedrock_statements(template, "com")
+    assert set(as_list(stmt["Action"])) == BEDROCK_ACTIONS
+    res = [json.dumps(r) for r in as_list(stmt["Resource"])]
+    assert '"arn:aws:bedrock:*::foundation-model/*"' in res
+    assert any(":inference-profile/*" in r and "AWS::AccountId" in r for r in res)
+    assert len(res) == 2
+    for key in ("prime", "doorman"):
+        assert bedrock_statements(template, key) == [], key

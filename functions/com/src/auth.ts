@@ -7,6 +7,7 @@
 // OpenAI-style keys are picked by the longest base-URL prefix of the request URL.
 
 import type { HttpRequestBody } from "../../shared/src/envelope.ts";
+import { defaultSigner, type Signer } from "./sigv4.ts";
 
 export interface ModelSecret {
   anthropic?: string;
@@ -16,8 +17,6 @@ export interface ModelSecret {
 export interface SecretSource {
   get(): Promise<ModelSecret>;
 }
-
-export class UnsupportedAuth extends Error {}
 
 /** Load once, share the promise; a failed load is retried next time. */
 export function cachedSecrets(load: () => Promise<ModelSecret>): SecretSource {
@@ -45,7 +44,12 @@ export function openaiKeyFor(url: string, keys: Record<string, string> = {}): st
   return best;
 }
 
-export async function applyAuth(req: HttpRequestBody, secrets: SecretSource): Promise<Record<string, string>> {
+export async function applyAuth(
+  req: HttpRequestBody,
+  secrets: SecretSource,
+  body: string | Uint8Array | null = null,
+  signer: Signer = defaultSigner,
+): Promise<Record<string, string>> {
   const headers = { ...req.headers };
   switch (req.auth) {
     case "none":
@@ -64,6 +68,7 @@ export async function applyAuth(req: HttpRequestBody, secrets: SecretSource): Pr
       return headers;
     }
     case "bedrock":
-      throw new UnsupportedAuth("bedrock auth not implemented");
+      // SigV4 over the exact body Com sends; credentials from the execution role.
+      return { ...headers, ...(await signer.sign({ method: req.method, url: req.url, headers, body })) };
   }
 }

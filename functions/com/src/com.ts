@@ -128,7 +128,7 @@ export class ComCore {
         signal,
       );
     } else {
-      const headers = await applyAuth(req, this.d.secrets);
+      const headers = await applyAuth(req, this.d.secrets, reqBody);
       res = await this.d.fetch(req.url, { method: req.method, headers, ...(reqBody !== null ? { body: reqBody } : {}), signal });
     }
     const headers: Record<string, string> = {};

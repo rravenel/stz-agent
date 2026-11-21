@@ -181,6 +181,17 @@ class StzAgentStack(Stack):
         bucket.grant_read_write(com)
         bucket.grant_read(doorman)
         secret.grant_read(com)
+        # Bedrock (auth "bedrock", #0025): Com signs with its own role. Cross-region
+        # inference profiles fan out, so foundation models are allowed in any region.
+        com.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=[
+                    "arn:aws:bedrock:*::foundation-model/*",
+                    self.format_arn(service="bedrock", resource="inference-profile", resource_name="*"),
+                ],
+            )
+        )
 
         # --- Spike S2 (#0004): driver + target, not in demo --------------------
         if spike_s2:

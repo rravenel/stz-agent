@@ -124,13 +124,21 @@ test("timeout: terminal ok:false 'timeout after Ns'", async () => {
   assert.deepEqual([s.responses[0]!.ok, s.responses[0]!.error], [false, "timeout after 0.05s"]);
 });
 
-test("network error and bedrock: terminal ok:false with the error", async () => {
+test("network error and bedrock without credentials: terminal ok:false with the error", async () => {
+  const saved = { id: process.env["AWS_ACCESS_KEY_ID"], key: process.env["AWS_SECRET_ACCESS_KEY"] };
+  delete process.env["AWS_ACCESS_KEY_ID"];
+  delete process.env["AWS_SECRET_ACCESS_KEY"];
   const s = setup({ fetch: (async () => { throw new Error("ECONNRESET"); }) as typeof fetch });
   s.prime.send("com", "http.request", req());
-  s.prime.send("com", "http.request", req({ request_id: "req-2", auth: "bedrock" }));
-  await until(() => s.responses.length === 2);
+  s.prime.send("com", "http.request", req({ request_id: "req-2", auth: "bedrock", url: "https://bedrock-runtime.us-west-2.amazonaws.com/model/m/invoke" }));
+  try {
+    await until(() => s.responses.length === 2);
+  } finally {
+    if (saved.id !== undefined) process.env["AWS_ACCESS_KEY_ID"] = saved.id;
+    if (saved.key !== undefined) process.env["AWS_SECRET_ACCESS_KEY"] = saved.key;
+  }
   const byId = Object.fromEntries(s.responses.map((r) => [r.request_id, r.error]));
-  assert.deepEqual(byId, { "req-1": "ECONNRESET", "req-2": "bedrock auth not implemented" });
+  assert.deepEqual(byId, { "req-1": "ECONNRESET", "req-2": "bedrock auth: AWS credentials are not set in the environment" });
 });
 
 test("mock model via Com, with delay scale", async () => {
