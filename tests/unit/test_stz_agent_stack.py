@@ -142,7 +142,7 @@ def test_function_env_vars(template):
         "PRIME_FUNCTION_NAME",
         "COM_FUNCTION_NAME",
     }
-    extra = {"doorman": {"API_TOKEN"}, "prime": set(), "com": {"MODEL_SECRET_ARN"}}
+    extra = {"doorman": {"API_TOKEN"}, "prime": {"MODEL_PROVIDER", "MODEL_NAME"}, "com": {"MODEL_SECRET_ARN"}}
     for key in NAMES:
         _, fn = fn_resource(template, key)
         env = fn["Properties"]["Environment"]["Variables"]
@@ -317,3 +317,44 @@ def test_spike_s2_keeps_core_tests(spike_template):
     test_queue_permissions(spike_template)
     test_only_com_reads_secret(spike_template)
     test_invoke_permissions(spike_template)
+
+
+# --- Model config (#0008) -------------------------------------------------
+
+
+def env_of(template, key):
+    _, fn = fn_resource(template, key)
+    return fn["Properties"]["Environment"]["Variables"]
+
+
+def test_prime_model_defaults_to_mock(template):
+    env = env_of(template, "prime")
+    assert env["MODEL_PROVIDER"] == "mock" and env["MODEL_NAME"] == "mock"
+    assert "OPENAI_BASE_URL" not in env
+    assert "MOCK_DELAY_SCALE" not in env_of(template, "com")
+
+
+def test_model_config_passes_through():
+    app = core.App()
+    stack = StzAgentStack(
+        app,
+        STACK,
+        api_token="t",
+        model_provider="openai",
+        model_name="gpt-x",
+        openai_base_url="https://llm.example/v1",
+        mock_delay_scale="0.1",
+    )
+    t = assertions.Template.from_stack(stack)
+    env = env_of(t, "prime")
+    assert (env["MODEL_PROVIDER"], env["MODEL_NAME"], env["OPENAI_BASE_URL"]) == (
+        "openai",
+        "gpt-x",
+        "https://llm.example/v1",
+    )
+    assert env_of(t, "com")["MOCK_DELAY_SCALE"] == "0.1"
+
+
+def test_invalid_model_provider_raises():
+    with pytest.raises(ValueError, match="model_provider"):
+        StzAgentStack(core.App(), STACK, api_token="t", model_provider="gemini")

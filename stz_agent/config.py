@@ -15,3 +15,13 @@ def resolve_api_token(env_name: str, ctx_token: Optional[str]) -> str:
     if env_name == "build":
         return BUILD_PLACEHOLDER_TOKEN
     raise ValueError("set STZ_API_TOKEN or -c api_token=…")
+
+
+MODEL_PROVIDERS = ("mock", "anthropic", "openai")
+
+
+def validate_model_provider(provider: str) -> str:
+    """Prime's MODEL_PROVIDER (models/config.ts adapterFromEnv)."""
+    if provider not in MODEL_PROVIDERS:
+        raise ValueError(f"model_provider {provider!r} must be one of {', '.join(MODEL_PROVIDERS)}")
+    return provider

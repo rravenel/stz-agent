@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 
 from aws_cdk import (
     ArnFormat,
@@ -16,6 +17,8 @@ from aws_cdk import (
     aws_sqs as sqs,
 )
 from constructs import Construct
+
+from stz_agent.config import validate_model_provider
 
 ROOT = Path(__file__).resolve().parents[1]
 FUNCTIONS = ("doorman", "prime", "com")
@@ -36,6 +39,10 @@ class StzAgentStack(Stack):
         *,
         api_token: str,
         spike_s2: bool = False,
+        model_provider: str = "mock",
+        model_name: str = "mock",
+        openai_base_url: Optional[str] = None,
+        mock_delay_scale: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -142,8 +149,14 @@ class StzAgentStack(Stack):
 
         # Doorman: HTTP API integrations cap at 30 s.
         doorman = make_fn("doorman", 128, Duration.seconds(29), {"API_TOKEN": api_token})
-        prime = make_fn("prime", 2048, Duration.minutes(15), {})
-        com = make_fn("com", 128, Duration.minutes(15), {"MODEL_SECRET_ARN": secret.secret_arn})
+        prime_env = {"MODEL_PROVIDER": validate_model_provider(model_provider), "MODEL_NAME": model_name}
+        if openai_base_url:
+            prime_env["OPENAI_BASE_URL"] = openai_base_url
+        com_env = {"MODEL_SECRET_ARN": secret.secret_arn}
+        if mock_delay_scale is not None:
+            com_env["MOCK_DELAY_SCALE"] = str(mock_delay_scale)
+        prime = make_fn("prime", 2048, Duration.minutes(15), prime_env)
+        com = make_fn("com", 128, Duration.minutes(15), com_env)
         fns = {"doorman": doorman, "prime": prime, "com": com}
 
         prime.configure_async_invoke(max_event_age=Duration.seconds(60), retry_attempts=0)
