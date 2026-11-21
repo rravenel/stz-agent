@@ -1,11 +1,11 @@
 // File access for the REPL (spec §5.2): the REPL sees `/workspace`, which maps
 // to a host directory (`/tmp/workspace` in Lambda). Paths are confined: no
-// `..` escape and no symlink escape. Text (UTF-8) only in v0.
+// `..` escape, and no symlinks at all. Text (UTF-8) only in v0.
 
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
+  appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
-import { dirname, join, posix, sep } from "node:path";
+import { dirname, join, posix } from "node:path";
 
 export const WORKSPACE = "/workspace";
 export const DEFAULT_WORKSPACE_DIR = "/tmp/workspace";
@@ -26,13 +26,22 @@ export class Workspace {
     if (!p) throw new Error("path is required");
     const abs = posix.resolve(WORKSPACE, p);
     if (abs !== WORKSPACE && !abs.startsWith(`${WORKSPACE}/`)) throw new Error(`path is outside ${WORKSPACE}: ${p}`);
-    const host = join(this.root, ...abs.slice(WORKSPACE.length).split("/").filter(Boolean));
-    // Symlinks: the nearest existing ancestor (or the file itself) must resolve inside the root.
-    let probe = host;
-    while (!existsSync(probe) && probe !== this.root) probe = dirname(probe);
-    const real = realpathSync(probe);
-    if (real !== this.root && !real.startsWith(this.root + sep)) throw new Error(`path is outside ${WORKSPACE}: ${p}`);
-    return host;
+    const parts = abs.slice(WORKSPACE.length).split("/").filter(Boolean);
+    // Refuse symlinks anywhere under the root, including dangling ones: a
+    // dangling link pointing outside would otherwise let `write` create the
+    // outside file (#0012 review). The workspace never needs links.
+    let host = this.root;
+    for (const part of parts) {
+      host = join(host, part);
+      let st;
+      try {
+        st = lstatSync(host);
+      } catch {
+        break; // doesn't exist yet: nothing below it exists either
+      }
+      if (st.isSymbolicLink()) throw new Error(`path is outside ${WORKSPACE} (symlink): ${p}`);
+    }
+    return join(this.root, ...parts);
   }
 
   /** One entry point for the `__host_fs` host function. Returns a string; throws on error. */

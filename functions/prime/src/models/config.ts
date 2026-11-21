@@ -5,6 +5,7 @@
 //   MODEL_PROVIDER  anthropic | openai | mock   (bedrock: not yet, see issues)
 //   MODEL_NAME      provider's model id (mock: any label)
 //   OPENAI_BASE_URL required for openai, e.g. https://api.openai.com/v1
+//   OPENAI_MAX_TOKENS_FIELD  max_tokens (default) | max_completion_tokens
 
 import { anthropicAdapter } from "./anthropic.ts";
 import { openaiAdapter } from "./openai.ts";
@@ -26,7 +27,11 @@ export function adapterFromEnv(env: Record<string, string | undefined> = process
     case "openai": {
       const baseUrl = (env["OPENAI_BASE_URL"] ?? "").trim();
       if (!/^https?:\/\//.test(baseUrl)) throw new Error("OPENAI_BASE_URL must be an http(s) URL for MODEL_PROVIDER=openai");
-      return openaiAdapter({ model, baseUrl });
+      const field = (env["OPENAI_MAX_TOKENS_FIELD"] ?? "").trim() || "max_tokens";
+      if (field !== "max_tokens" && field !== "max_completion_tokens") {
+        throw new Error(`OPENAI_MAX_TOKENS_FIELD must be max_tokens or max_completion_tokens, got ${JSON.stringify(field)}`);
+      }
+      return openaiAdapter({ model, baseUrl, maxTokensField: field });
     }
     case "bedrock":
       throw new Error("MODEL_PROVIDER=bedrock is not implemented yet (#0021)");

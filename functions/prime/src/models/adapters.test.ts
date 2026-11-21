@@ -131,3 +131,41 @@ test("adapterFromEnv picks the provider and refuses bad config", () => {
   assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m" }), /not implemented/);
   assert.throws(() => adapterFromEnv({}), /MODEL_PROVIDER/);
 });
+
+// --- #0014 review notes ------------------------------------------------------
+
+test("anthropic request drops empty text blocks and messages left empty", () => {
+  const r: ModelRequest = {
+    max_tokens: 10,
+    messages: [
+      { role: "user", content: [{ type: "text", text: "hi" }, { type: "text", text: "  " }] },
+      { role: "assistant", content: [{ type: "text", text: "" }] },
+      { role: "assistant", content: [{ type: "text", text: "" }, { type: "tool_call", id: "c1", name: "repl", input: { code: "1" } }] },
+    ],
+  };
+  const body = JSON.parse(anthropicAdapter({ model: "m" }).toRequest(r).body);
+  assert.deepEqual(body.messages, [
+    { role: "user", content: [{ type: "text", text: "hi" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "repl", input: { code: "1" } }] },
+  ]);
+});
+
+test("openai output-limit field is configurable (max_tokens by default)", () => {
+  const plain = JSON.parse(openaiAdapter({ model: "m", baseUrl: "http://x/v1" }).toRequest(req).body);
+  assert.equal(plain.max_tokens, 1024);
+  assert.equal(plain.max_completion_tokens, undefined);
+  const env = { MODEL_PROVIDER: "openai", MODEL_NAME: "m", OPENAI_BASE_URL: "https://api.openai.com/v1", OPENAI_MAX_TOKENS_FIELD: "max_completion_tokens" };
+  const newer = JSON.parse(adapterFromEnv(env).toRequest(req).body);
+  assert.equal(newer.max_completion_tokens, 1024);
+  assert.equal(newer.max_tokens, undefined);
+  assert.throws(() => adapterFromEnv({ ...env, OPENAI_MAX_TOKENS_FIELD: "tokens" }), /OPENAI_MAX_TOKENS_FIELD/);
+});
+
+test("the repl tool description matches how evals run (return, globalThis, no last-expression value)", () => {
+  const body = JSON.parse(anthropicAdapter({ model: "m" }).toRequest(req).body);
+  const d: string = body.tools[0].description;
+  assert.match(d, /use `return`/);
+  assert.match(d, /globalThis/);
+  assert.doesNotMatch(d, /last expression/);
+  assert.doesNotMatch(JSON.stringify(body.tools[0].input_schema), /last expression/);
+});
