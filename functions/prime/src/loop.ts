@@ -26,10 +26,23 @@ export const DEFAULT_SYSTEM =
   "(/workspace via the fs global) and computation. Each call runs as an async function body: `return` a value, " +
   "and keep anything you need in later calls on globalThis. Requests may take minutes; just await them.";
 
-/** Request ids. Model calls take the seq of their model.request event; REPL fetches use the REPL's own counter. */
+/**
+ * Request ids. A model call takes the seq its model.request event was written
+ * at (seqs never repeat). A REPL fetch is `repl-<run>-<rN>`: rN is the REPL's
+ * own counter, which restarts from the checkpoint after a crash, so the run
+ * prefix keeps a re-issued fetch from sharing an id with the crashed run's
+ * request. Com then runs it again (spec §5.4 allows duplicates), and the
+ * crashed run's late response is unknown and dropped (#0013 review, note 3).
+ */
 export const modelRequestId = (seq: number) => `model-${seq}`;
-export const replRequestId = (replId: string) => `repl-${replId}`;
-const REPL_PREFIX = "repl-";
+export const replRequestId = (runTag: string, replId: string) => `repl-${runTag}-${replId}`;
+/** The REPL's own id (rN) inside a REPL request id. */
+export function replIdOf(requestId: string): string | null {
+  const m = /^repl-[A-Za-z0-9]+-(r\d+)$/.exec(requestId);
+  return m ? m[1]! : null;
+}
+/** A short, key-safe tag for a run id. */
+export const runTag = (run: string) => (run.replace(/[^A-Za-z0-9]/g, "").slice(0, 8) || "run");
 
 export interface HarnessOptions {
   state: PrimeState;
@@ -41,6 +54,8 @@ export interface HarnessOptions {
   log: LogWriter;
   system?: string;
   maxTokens?: number;
+  /** Lambda request id of this run; tags REPL request ids. */
+  run: string;
 }
 
 /**
@@ -116,6 +131,9 @@ export class Harness {
     state.model_context = [];
     // A late response to the old conversation's model call is then unknown and dropped.
     for (const [id, p] of Object.entries(state.pending_requests)) if (p.purpose === "model") delete state.pending_requests[id];
+    // Their evals may still be waiting on fetches: drop them in the REPL too,
+    // or their results would sit in every later snapshot (#0013 review, note 1).
+    for (const id of state.open_tool_calls) this.o.repl.discard(id);
     state.open_tool_calls = [];
     await log.append("conv.clear", { msg_id: msgId, body: { conv: state.conv } });
   }
@@ -129,8 +147,8 @@ export class Harness {
 
   private async onReplResponse(res: InboundResponse): Promise<void> {
     const { repl } = this.o;
-    if (!res.requestId.startsWith(REPL_PREFIX)) return;
-    const id = res.requestId.slice(REPL_PREFIX.length);
+    const id = replIdOf(res.requestId);
+    if (!id) return;
     if (res.ok) repl.resolvePending(id, { status: res.status ?? 200, headers: res.headers, body: res.body });
     else repl.rejectPending(id, res.error ?? "request failed");
     await this.flushFetches();
@@ -158,6 +176,28 @@ export class Harness {
     this.context.push({ role: "assistant", content: reply.content });
     for (const call of reply.content) if (call.type === "tool_call") await this.runTool(call);
     await this.flushFetches();
+  }
+
+  /**
+   * After a restore: fail every pending request older than timeout_s + 60 s
+   * as lost (spec §5.4). Com died and took it along. The REPL promise is
+   * rejected, or the model call reported failed, and the turn carries on.
+   */
+  async failStale(now: Date): Promise<string[]> {
+    const { state, log } = this.o;
+    const lost: string[] = [];
+    for (const [id, p] of Object.entries(state.pending_requests)) {
+      const limitS = p.timeout_s + 60;
+      if (now.getTime() - Date.parse(p.sent_at) <= limitS * 1000) continue;
+      delete state.pending_requests[id];
+      lost.push(id);
+      const error = `lost: no response within ${limitS} s`;
+      await log.append("error", { corr_id: id, body: { where: "pending_request", lost: true, purpose: p.purpose, sent_at: p.sent_at, message: error } });
+      const res: InboundResponse = { requestId: id, purpose: p.purpose, ok: false, headers: {}, body: "", error };
+      if (p.purpose === "model") await this.onModelResponse(res);
+      else await this.onReplResponse(res);
+    }
+    return lost;
   }
 
   // ------------------------------------------------------------ tools
@@ -212,7 +252,7 @@ export class Harness {
       // Fetches made by code resumed after a response belong to the only open tool call, if there is one.
       const owner = this.fetchOwner.get(f.requestId) ?? (state.open_tool_calls.length === 1 ? state.open_tool_calls[0] : undefined);
       this.fetchOwner.delete(f.requestId);
-      await proxy.send(replRequestId(f.requestId), "repl", { method: f.method, url: f.url, headers: f.headers, body: f.body, auth: "none" }, owner);
+      await proxy.send(replRequestId(runTag(this.o.run), f.requestId), "repl", { method: f.method, url: f.url, headers: f.headers, body: f.body, auth: "none" }, owner);
     }
   }
 
@@ -226,12 +266,12 @@ export class Harness {
     const messages = normalize(this.context);
     this.state.model_context = messages;
     const req = adapter.toRequest({ system: this.o.system ?? DEFAULT_SYSTEM, messages, max_tokens: this.o.maxTokens ?? DEFAULT_MAX_TOKENS });
-    const requestId = modelRequestId(log.next);
-    await log.append("model.request", {
-      corr_id: requestId,
+    const ev = await log.append("model.request", (seq) => ({
+      corr_id: modelRequestId(seq),
       body: { provider: adapter.provider, messages: messages.length },
-      body_ref: requestBodyKey(requestId),
-    });
+      body_ref: requestBodyKey(modelRequestId(seq)),
+    }));
+    const requestId = ev.corr_id!;
     await proxy.send(requestId, "model", { method: req.method, url: req.url, headers: req.headers, body: req.body, auth: req.auth });
     return true;
   }

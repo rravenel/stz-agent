@@ -1,33 +1,57 @@
-// Minimal checkpoint (spec §5.4), enough for a turn to span Prime runs.
-// #0015 replaces the bodies (workspace sync, stale pending requests,
-// crash tests); keep the two signatures.
+// Checkpoint and restore (spec §5.4).
 //
-// Write order: ckpt-<n>/state.json, ckpt-<n>/repl.bin, then latest.json, so a
-// crash part-way leaves the previous checkpoint in effect.
+// Write order: ckpt-<n>/state.json, ckpt-<n>/repl.bin, the workspace sync,
+// then latest.json. latest.json is the commit point: a failure anywhere
+// before it throws, and the previous checkpoint stays in effect. Held SQS
+// messages are deleted only after this returns (handler.ts).
 
 import { checkpointReplKey, checkpointStateKey, LATEST_CHECKPOINT_KEY } from "../../shared/src/s3-keys.ts";
 import { initialState, type LatestCheckpoint, type PrimeState } from "../../shared/src/state.ts";
 import type { LogWriter } from "./log.ts";
 import { Repl, type ReplOptions } from "./repl/repl.ts";
+import { DEFAULT_WORKSPACE_DIR } from "./repl/workspace.ts";
 import { getJSON, type ObjectStore } from "./store.ts";
+import { syncDown, syncUp, type Manifest } from "./workspace-sync.ts";
 
 /** Log events written after a checkpoint by the same run: `checkpoint`, then `exit_idle`. */
 const SEQS_RESERVED_AFTER_CHECKPOINT = 2;
 
+export interface WorkspaceMirror {
+  dir: string;
+  /** What S3 workspace/ holds, by path → SHA-256. */
+  manifest: Manifest;
+}
+
 export interface Loaded {
   state: PrimeState;
   repl: Repl;
+  workspace: WorkspaceMirror;
   /** False on the very first run (no checkpoint yet). */
   restored: boolean;
 }
 
 export async function loadCheckpoint(store: ObjectStore, replOptions: ReplOptions): Promise<Loaded> {
+  const dir = replOptions.workspaceDir ?? DEFAULT_WORKSPACE_DIR;
   const latest = await getJSON<LatestCheckpoint>(store, LATEST_CHECKPOINT_KEY);
-  if (!latest) return { state: initialState(), repl: await Repl.create(replOptions), restored: false };
-  const state = await getJSON<PrimeState>(store, checkpointStateKey(latest.n));
-  const snap = await store.get(checkpointReplKey(latest.n));
-  if (!state || !snap) throw new Error(`checkpoint ${latest.n} is incomplete`);
-  return { state, repl: await Repl.restore(snap, replOptions), restored: true };
+  let state = initialState();
+  let snap: Uint8Array | null = null;
+  if (latest) {
+    const s = await getJSON<PrimeState>(store, checkpointStateKey(latest.n));
+    snap = await store.get(checkpointReplKey(latest.n));
+    if (!s || !snap) throw new Error(`checkpoint ${latest.n} is incomplete`);
+    state = s;
+  }
+  // The workspace first: the REPL's fs binds to the directory as it is.
+  const manifest = await syncDown(store, dir);
+  const repl = snap ? await Repl.restore(snap, replOptions) : await Repl.create(replOptions);
+  return { state, repl, workspace: { dir, manifest }, restored: latest !== null };
+}
+
+export interface SaveResult {
+  n: number;
+  uploaded: number;
+  deleted: number;
+  skipped: string[];
 }
 
 /**
@@ -35,14 +59,25 @@ export async function loadCheckpoint(store: ObjectStore, replOptions: ReplOption
  * the seqs of the events this run logs after the checkpoint, so the next run
  * doesn't collide with them and misreport a crash (seq_conflict).
  */
-export async function saveCheckpoint(store: ObjectStore, state: PrimeState, repl: Repl, log: LogWriter): Promise<number> {
+export async function saveCheckpoint(
+  store: ObjectStore,
+  state: PrimeState,
+  repl: Repl,
+  log: LogWriter,
+  workspace: WorkspaceMirror,
+): Promise<SaveResult> {
   const n = state.n + 1;
   const snap = repl.snapshot();
   const saved: PrimeState = { ...state, n, next_seq: log.next + SEQS_RESERVED_AFTER_CHECKPOINT };
   await store.put(checkpointStateKey(n), JSON.stringify(saved));
   await store.put(checkpointReplKey(n), snap);
+  const ws = await syncUp(store, workspace.dir, workspace.manifest);
   await store.put(LATEST_CHECKPOINT_KEY, JSON.stringify({ n } satisfies LatestCheckpoint));
   state.n = n;
-  await log.lifecycle("checkpoint", { n, repl_bytes: snap.length });
-  return n;
+  await log.lifecycle("checkpoint", {
+    n,
+    repl_bytes: snap.length,
+    workspace: { uploaded: ws.uploaded.length, deleted: ws.deleted.length, ...(ws.skipped.length ? { skipped: ws.skipped } : {}) },
+  });
+  return { n, uploaded: ws.uploaded.length, deleted: ws.deleted.length, skipped: ws.skipped };
 }

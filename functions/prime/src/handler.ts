@@ -1,7 +1,7 @@
 // Prime's handler flow (spec §5.1), with its dependencies injected so tests
 // run it against fakes. Real wiring (the SQS comms worker from #0005, S3)
 // happens in #0008. The stale-wake check, the full exit checklist and the
-// 12-minute continuation are #0016; checkpoint hardening is #0015.
+// 12-minute continuation are #0016.
 
 import { randomUUID } from "node:crypto";
 import type { Comms, Delivery } from "../../shared/src/comms.ts";
@@ -57,20 +57,24 @@ export function createHandler(deps: PrimeDeps) {
       // 3. Stale-wake check: #0016.
       // 4. Restore.
       const outbox: FetchRequest[] = [];
-      const { state, repl, restored } = await loadCheckpoint(deps.store, {
+      const { state, repl, restored, workspace } = await loadCheckpoint(deps.store, {
         ...deps.replOptions,
         onFetch: (r) => outbox.push(r),
       });
       const log = new LogWriter(deps.store, run, state, now);
       await log.lifecycle("start", { reason: event.reason ?? null });
-      if (restored) await log.lifecycle("restore", { n: state.n });
+      if (restored) await log.lifecycle("restore", { n: state.n, workspace_files: workspace.manifest.size });
 
       const proxy = new Proxy(deps.store, comms, log, state, now);
       const harness = new Harness({
-        state, repl, outbox, adapter: deps.adapter, proxy, log,
+        state, repl, outbox, adapter: deps.adapter, proxy, log, run,
         ...(deps.system !== undefined ? { system: deps.system } : {}),
         ...(deps.maxTokens !== undefined ? { maxTokens: deps.maxTokens } : {}),
       });
+
+      // Requests Com never answered (it died with them): fail them now.
+      await harness.failStale(now());
+      await harness.step();
 
       const held: string[] = [];
       let processed = 0;
@@ -96,7 +100,7 @@ export function createHandler(deps: PrimeDeps) {
         // 6. Minimal exit (full checklist: #0016): checkpoint, then delete
         // what it covers, then a final poll. A message in the final poll goes
         // back round the loop.
-        await saveCheckpoint(deps.store, state, repl, log);
+        await saveCheckpoint(deps.store, state, repl, log, workspace);
         for (const r of held.splice(0)) await comms.deleteMessage(r);
         const empty = await comms.finalPoll(deps.idleGraceMs ?? IDLE_GRACE_MS);
         if (empty && inbox.length === 0) {

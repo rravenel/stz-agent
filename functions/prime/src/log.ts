@@ -32,7 +32,12 @@ export class LogWriter {
     this.now = now;
   }
 
-  async append(kind: LogKind, fields: LogFields = {}): Promise<LogEvent> {
+  /**
+   * Write one event. `fields` may be a function of the seq actually written,
+   * for events whose ids derive from it (model.request): on a conflict the
+   * seq moves, and the id moves with it (#0013 review).
+   */
+  async append(kind: LogKind, fields: LogFields | ((seq: number) => LogFields) = {}): Promise<LogEvent> {
     const wanted = this.next;
     const ev = await this.write(kind, fields);
     if (ev.seq !== wanted) {
@@ -45,8 +50,9 @@ export class LogWriter {
     return this.append("lifecycle", { body: { event, ...extra } });
   }
 
-  private async write(kind: LogKind, fields: LogFields): Promise<LogEvent> {
+  private async write(kind: LogKind, fieldsOf: LogFields | ((seq: number) => LogFields)): Promise<LogEvent> {
     for (;;) {
+      const fields = typeof fieldsOf === "function" ? fieldsOf(this.next) : fieldsOf;
       const ev: LogEvent = { seq: this.next, ts: this.now().toISOString(), run: this.run, conv: this.conv, kind };
       if (fields.corr_id !== undefined) ev.corr_id = fields.corr_id;
       if (fields.msg_id !== undefined) ev.msg_id = fields.msg_id;

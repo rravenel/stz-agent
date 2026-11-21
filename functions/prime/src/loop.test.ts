@@ -2,99 +2,19 @@
 // invocation that restores from the fake store, as a new Lambda would.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { InMemoryBus, type InMemoryComms } from "../../shared/src/comms.ts";
+import { InMemoryBus } from "../../shared/src/comms.ts";
 import type { Envelope, EnvelopeFor } from "../../shared/src/envelope.ts";
 import { logKey, responseBodyKey } from "../../shared/src/s3-keys.ts";
-import type { LogEvent, PrimeState } from "../../shared/src/state.ts";
+import type { LogEvent } from "../../shared/src/state.ts";
 import { initialState } from "../../shared/src/state.ts";
-import { createHandler } from "./handler.ts";
 import { LogWriter } from "./log.ts";
 import { Harness, normalize, TOOL_RESULT_LIMIT, toolResultContent } from "./loop.ts";
-import { anthropicAdapter } from "./models/anthropic.ts";
 import { MOCK_URL } from "./models/config.ts";
 import type { Message } from "./models/turn.ts";
 import { Proxy } from "./proxy.ts";
 import type { FetchRequest, Repl } from "./repl/repl.ts";
-import { getJSON, getText, MemoryStore } from "./store.ts";
-
-const adapter = anthropicAdapter({ model: "mock", url: MOCK_URL, auth: "mock" });
-
-/** The fake stack: bus + store, a client, and the test playing Com. */
-class World {
-  readonly bus = new InMemoryBus();
-  readonly store = new MemoryStore();
-  readonly workspaceDir = join(mkdtempSync(join(tmpdir(), "stz-loop-")), "workspace");
-  private readonly client = this.bus.connect("doorman");
-  private runs = 0;
-  readonly handler = createHandler({
-    comms: () => this.bus.connect("prime"),
-    store: this.store,
-    adapter,
-    replOptions: { workspaceDir: this.workspaceDir },
-    idleGraceMs: 5,
-  });
-
-  constructor() {
-    this.client.onMessage(() => {}); // acks from Prime
-  }
-
-  say(text: string, msgId: string) {
-    this.client.send("prime", "user.message", { text }, { msg_id: msgId });
-  }
-
-  run(reason = "wake") {
-    return this.handler({ reason }, { awsRequestId: `run${++this.runs}` });
-  }
-
-  /** Com: take every http.request waiting in its queue (accept = delete), as Com would. */
-  async takeRequests(): Promise<EnvelopeFor<"http.request">[]> {
-    const com: InMemoryComms = this.bus.connect("com");
-    const got: EnvelopeFor<"http.request">[] = [];
-    com.onMessage((d) => {
-      if (d.msg.type === "http.request") got.push(d.msg);
-      void com.deleteMessage(d.receipt);
-    });
-    await new Promise((r) => setImmediate(r));
-    await com.stop();
-    return got;
-  }
-
-  async requestBody(req: EnvelopeFor<"http.request">): Promise<unknown> {
-    return JSON.parse((await getText(this.store, req.body.body_ref!))!);
-  }
-
-  /** Com: answer a request (body to S3, then http.response to Prime's queue). */
-  async respond(requestId: string, body: string, opts: { ok?: boolean; status?: number; error?: string } = {}) {
-    const ok = opts.ok ?? true;
-    const com = this.bus.connect("com");
-    com.onMessage(() => {});
-    if (ok) await this.store.put(responseBodyKey(requestId), body);
-    com.send("prime", "http.response", {
-      request_id: requestId,
-      ok,
-      ...(ok ? { status: opts.status ?? 200, body_ref: responseBodyKey(requestId), headers: {} } : { error: opts.error ?? "failed" }),
-      elapsed_ms: 5,
-    });
-    await com.stop();
-  }
-
-  async log(): Promise<LogEvent[]> {
-    const keys = await this.store.list("log/");
-    return Promise.all(keys.map(async (k) => (await getJSON<LogEvent>(this.store, k))!));
-  }
-
-  async state(): Promise<PrimeState> {
-    const { n } = (await getJSON<{ n: number }>(this.store, "prime/latest.json"))!;
-    return (await getJSON<PrimeState>(this.store, `prime/ckpt-${n}/state.json`))!;
-  }
-}
-
-const anthropic = (content: unknown[], stop = "end_turn") => JSON.stringify({ type: "message", role: "assistant", content, stop_reason: stop });
-const toolUse = (id: string, code: string) => anthropic([{ type: "tool_use", id, name: "repl", input: { code } }], "tool_use");
-const kinds = (events: LogEvent[]) => events.map((e) => (e.kind === "lifecycle" ? `lifecycle:${(e.body as { event: string }).event}` : e.kind));
+import { getJSON, MemoryStore } from "./store.ts";
+import { adapter, anthropic, kinds, toolUse, World } from "./test-world.ts";
 
 test("one turn spans four runs: model call, tool call whose fetch is answered later, final answer", async () => {
   const w = new World();
@@ -120,14 +40,14 @@ test("one turn spans four runs: model call, tool call whose fetch is answered la
   assert.equal(f1!.body.purpose, "repl");
   assert.equal(f1!.body.auth, "none");
   assert.equal(f1!.body.url, "https://example.com/");
-  assert.equal(f1!.body.request_id, "repl-r1");
+  assert.equal(f1!.body.request_id, "repl-run2-r1");
   let st = await w.state();
   assert.deepEqual(st.open_tool_calls, ["call_1"]);
-  assert.deepEqual(Object.keys(st.pending_requests), ["repl-r1"]);
-  assert.equal(st.pending_requests["repl-r1"]!.tool_call_id, "call_1");
+  assert.deepEqual(Object.keys(st.pending_requests), ["repl-run2-r1"]);
+  assert.equal(st.pending_requests["repl-run2-r1"]!.tool_call_id, "call_1");
 
   // Run 3: the fetch response settles the eval (restored from the snapshot) → tool result → next model call.
-  await w.respond("repl-r1", "<html><title>Example Domain</title></html>");
+  await w.respond("repl-run2-r1", "<html><title>Example Domain</title></html>");
   await w.run();
   const [m2, ...more3] = await w.takeRequests();
   assert.equal(more3.length, 0);
@@ -250,7 +170,7 @@ function harnessWithFakeRepl() {
   const evals: string[] = [];
   const repl = { eval: (id: string) => { evals.push(id); return { status: "done", value: "1", stdout: "", stderr: "" }; } } as unknown as Repl;
   const outbox: FetchRequest[] = [];
-  const h = new Harness({ state, repl, outbox, adapter, proxy, log });
+  const h = new Harness({ state, repl, outbox, adapter, proxy, log, run: "run" });
   state.pending_requests["model-0"] = { purpose: "model", sent_at: "", timeout_s: 600 };
   const respond = async (content: unknown[]) => {
     await store.put(responseBodyKey("model-0"), anthropic(content, "tool_use"));
