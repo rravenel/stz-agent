@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { handler } from "./index.ts";
+import { acceptDeadline, MARGIN_MS } from "./index.ts";
 
-test("com stub handler answers with its name and the wake reason", async () => {
-  assert.deepEqual(await handler({ reason: "wake" }), { stub: "com", reason: "wake" });
-  assert.deepEqual(await handler(), { stub: "com", reason: null });
+test("acceptDeadline: run end minus a 60 s margin", () => {
+  assert.equal(MARGIN_MS, 60_000);
+  assert.equal(acceptDeadline(1_000, 900_000), 1_000 + 900_000 - 60_000);
 });
