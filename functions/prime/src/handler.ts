@@ -18,8 +18,6 @@ export const IDLE_GRACE_MS = 2_000;
 export const RUN_DEADLINE_MS = 12 * 60_000;
 export const HARD_STOP_MS = 14 * 60_000;
 export const ACK_POLL_MS = 50;
-/** After the deadline, absorb inbound work only while this much time is left before the hard stop (one eval's CPU limit, plus margin). */
-const ABSORB_MARGIN_MS = 60_000;
 
 export interface WakeEvent {
   reason?: string;
@@ -59,6 +57,55 @@ export interface RunSummary {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * The run's comms, restartable. Stopping the worker awaits its in-flight
+ * long poll, and a message that poll receives is acked and handed over
+ * *after* the run decided to exit (#0029). The sender then sees the ack and
+ * wakes nobody, so the run must not leave it behind: when the inbox isn't
+ * empty after stop(), the handler restarts comms here and keeps going.
+ * stop() is idempotent (a WorkerComms can't be stopped twice).
+ */
+class RunComms implements Comms {
+  private cur: Comms;
+  private stopped = false;
+  private handler: ((d: Delivery) => void) | null = null;
+  private readonly make: () => Comms;
+
+  constructor(make: () => Comms) {
+    this.make = make;
+    this.cur = make();
+  }
+  get self() {
+    return this.cur.self;
+  }
+  send: Comms["send"] = (to, type, body, opts) => this.cur.send(to, type, body, opts);
+  onMessage(h: (d: Delivery) => void): void {
+    this.handler = h;
+    this.cur.onMessage(h);
+  }
+  /** Receipts are per queue, not per consumer: a restarted worker can delete an earlier one's messages. */
+  deleteMessage(receipt: string): Promise<void> {
+    return this.cur.deleteMessage(receipt);
+  }
+  unackedCount(): number {
+    return this.cur.unackedCount();
+  }
+  finalPoll(graceMs: number): Promise<boolean> {
+    return this.cur.finalPoll(graceMs);
+  }
+  async stop(): Promise<void> {
+    if (this.stopped) return;
+    this.stopped = true;
+    await this.cur.stop();
+  }
+  restart(): void {
+    if (!this.stopped) return;
+    this.cur = this.make();
+    this.stopped = false;
+    if (this.handler) this.cur.onMessage(this.handler);
+  }
+}
 const tick = () => new Promise<void>((r) => setImmediate(r));
 
 export function createHandler(deps: PrimeDeps) {
@@ -76,7 +123,7 @@ export function createHandler(deps: PrimeDeps) {
     const isContinue = event.reason === "continue";
 
     // 1–2. Comms worker first: acks flow before (and during) the restore.
-    const comms = deps.comms();
+    const comms = new RunComms(deps.comms);
     const inbox: Delivery[] = [];
     comms.onMessage((d) => inbox.push(d));
 
@@ -87,7 +134,10 @@ export function createHandler(deps: PrimeDeps) {
         const until = Date.now() + staleWakeMs;
         await tick();
         while (inbox.length === 0 && Date.now() < until) await sleep(Math.min(10, staleWakeMs));
-        if (inbox.length === 0) {
+        // Stop before deciding: the worker's in-flight poll may still hand over a message.
+        if (inbox.length === 0) await comms.stop();
+        if (inbox.length > 0) comms.restart();
+        else {
           const peek = await peekState(deps.store);
           const log = new LogWriter(deps.store, run, peek, now);
           await log.lifecycle("stale_wake", { reason: event.reason ?? null, waited_ms: staleWakeMs });
@@ -131,7 +181,6 @@ export function createHandler(deps: PrimeDeps) {
       const drain = async () => {
         await tick();
         while (inbox.length) {
-          if (pastDeadline() && elapsed() >= hardStopMs - ABSORB_MARGIN_MS) return; // left in SQS for the next run
           const { msg, receipt } = inbox.shift()!;
           held.push(receipt);
           if (!markSeen(state, msg.msg_id)) {
@@ -162,7 +211,7 @@ export function createHandler(deps: PrimeDeps) {
         // that arrive while waiting go back to step 1.
         let backToIdle = false;
         while (comms.unackedCount() > 0) {
-          if (inbox.length && !(pastDeadline() && elapsed() >= hardStopMs - ABSORB_MARGIN_MS)) {
+          if (inbox.length) {
             backToIdle = true;
             break;
           }
@@ -177,7 +226,15 @@ export function createHandler(deps: PrimeDeps) {
         await saveCheckpoint(deps.store, state, repl, log, workspace);
         for (const r of held.splice(0)) await comms.deleteMessage(r);
 
+        // Exit (#0029): stop the worker, then make sure its last poll left nothing.
+        const exitNow = async () => {
+          await comms.stop();
+          if (inbox.length === 0) return true;
+          comms.restart();
+          return false;
+        };
         if (pastDeadline()) {
+          if (!(await exitNow())) continue;
           // Continuation (spec §5.5): the self-wake is the very last action.
           await log.lifecycle("exit_deadline", { elapsed_ms: elapsed(), runnable: harness.runnable() });
           if (!deps.selfWake) throw new Error("run deadline reached but no selfWake is configured");
@@ -187,6 +244,7 @@ export function createHandler(deps: PrimeDeps) {
         // Step 6: final poll. A message goes back to step 1.
         const empty = await comms.finalPoll(idleGraceMs);
         if (empty && inbox.length === 0) {
+          if (!(await exitNow())) continue;
           await log.lifecycle("exit_idle", { open_tool_calls: state.open_tool_calls.length, pending_requests: Object.keys(state.pending_requests).length });
           return { run, exit: "idle", restored, processed, duplicates, checkpoint: state.n };
         }

@@ -197,7 +197,7 @@ test("a malformed workspace/ key is skipped and logged; Prime still starts (#001
   assert.equal(existsSync(join(w.workspaceDir, "..", "evil.txt")), false);
 });
 
-test("past the absorb cut-off (hard stop − 60 s), inbound messages are left in SQS for the next run", async () => {
+test("late in the run (13.5 min), inbound messages are still absorbed, never left invisible in SQS (#0029, #0016 review)", async () => {
   let clock = Date.parse("2026-11-21T00:00:00Z");
   let advanced = false;
   const slow: ModelAdapter = {
@@ -211,8 +211,8 @@ test("past the absorb cut-off (hard stop − 60 s), inbound messages are left in
   w.say("second", "u2");
   const r = await w.run();
   assert.equal(r.exit, "deadline");
-  assert.equal(r.processed, 1);
-  assert.deepEqual(w.primeQueue().map((m) => m.msg_id), ["u2"], "not deleted: SQS redelivers it");
-  assert.deepEqual(((await w.state()).model_context as Message[]).length, 1);
+  assert.equal(r.processed, 2);
+  assert.deepEqual(w.primeQueue(), [], "both deleted after the checkpoint");
+  assert.deepEqual(((await w.state()).model_context as Message[]).length, 2);
   assert.equal(wakes.length, 1);
 });
