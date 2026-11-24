@@ -132,6 +132,7 @@ test("adapterFromEnv picks the provider and refuses bad config", () => {
   assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m" }), /AWS_REGION/);
   assert.match(adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m", AWS_REGION: "us-west-2" }).toRequest(req).url, /us-west-2/);
   assert.match(adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m", AWS_REGION: "us-west-2", BEDROCK_REGION: "us-east-1" }).toRequest(req).url, /us-west-2/);
+  assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m", BEDROCK_REGION: "us-east-1" }), /AWS_REGION/);
   assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m", AWS_REGION: "evil.com/x" }), /AWS_REGION/);
   assert.throws(() => adapterFromEnv({}), /MODEL_PROVIDER/);
 });
