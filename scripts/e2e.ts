@@ -102,7 +102,8 @@ export interface CliOptions {
 }
 
 export const USAGE = `Usage: node scripts/e2e.ts --env <name> [--outputs cdk.out/outputs-<env>.json] [--text "..."] [--timeout 600]
-  Needs STZ_API_TOKEN (the Doorman bearer token).`;
+  Needs STZ_API_TOKEN (the Doorman bearer token):
+  export STZ_API_TOKEN=$(aws secretsmanager get-secret-value --profile stz-dev --secret-id <ApiTokenSecretArn output> --query SecretString --output text)`;
 
 export const DEFAULT_TEXT = "Fetch https://example.com and tell me its title.";
 

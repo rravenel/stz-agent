@@ -67,7 +67,7 @@ test("events: query parsing", () => {
 });
 
 test("GET /events uses only the store (no comms, no invoker) and rejects bad after", async () => {
-  const deps = { token: TOKEN, store: store(bucket(2)), log: () => {} };
+  const deps = { token: async () => TOKEN, store: store(bucket(2)), log: () => {} };
   const ok = await route(deps, ev("GET", "/events", { query: { after: "0" } }));
   assert.equal(ok.statusCode, 200);
   assert.deepEqual(JSON.parse(ok.body), { events: [{ seq: 1 }], next_after: 1, more: false });

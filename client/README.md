@@ -4,7 +4,8 @@ Thin terminal client for the Doorman API.
 
 ```sh
 export STZ_API_URL=https://<api-id>.execute-api.<region>.amazonaws.com/
-export STZ_API_TOKEN=...            # read from the environment only, never a flag
+# read from the environment only, never a flag
+export STZ_API_TOKEN=$(aws secretsmanager get-secret-value --profile stz-dev --secret-id <ApiTokenSecretArn output> --query SecretString --output text)
 node client/src/cli.ts              # or: node client/dist/cli.mjs (after scripts/build.sh)
 node client/src/cli.ts --url URL --token-env MY_TOKEN_VAR
 ```

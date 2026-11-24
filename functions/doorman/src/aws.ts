@@ -2,6 +2,7 @@
 
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
+import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { fromEnv as commsFromEnv, type InvokeOutcome } from "../../shared/src/aws-ports.ts";
 import type { Deps, PrimeInvoker } from "./doorman.ts";
 import type { LogStore } from "./events.ts";
@@ -51,10 +52,27 @@ function need(env: NodeJS.ProcessEnv, k: string): string {
   return v;
 }
 
+/** Load once, share the in-flight load; a failed load is retried next time. */
+export function cachedSecret(load: () => Promise<string>): () => Promise<string> {
+  let p: Promise<string> | null = null;
+  return () =>
+    (p ??= load().catch((e: unknown) => {
+      p = null;
+      throw e;
+    }));
+}
+
+export async function loadTokenSecret(arn: string, client = new SecretsManagerClient({})): Promise<string> {
+  const r = await client.send(new GetSecretValueCommand({ SecretId: arn }));
+  if (!r.SecretString) throw new Error("API token secret is empty");
+  return r.SecretString;
+}
+
 export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): Deps {
   const ports = commsFromEnv("doorman", env); // SDK clients are reused across requests
+  const tokenArn = need(env, "API_TOKEN_SECRET_ARN");
   return {
-    token: need(env, "API_TOKEN"),
+    token: cachedSecret(() => loadTokenSecret(tokenArn)),
     comms: () => ports,
     prime: new LambdaPrimeInvoker(need(env, "PRIME_FUNCTION_NAME")),
     store: new S3LogStore(need(env, "BUCKET_NAME")),

@@ -5,7 +5,6 @@ import re
 
 import aws_cdk as cdk
 
-from stz_agent.config import resolve_api_token
 from stz_agent.stz_agent_stack import StzAgentStack
 
 
@@ -20,8 +19,6 @@ if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9-]{0,30}", env_name):
 stack = StzAgentStack(
     app,
     f"StzAgent-{env_name}",
-    # Doorman bearer token: -c api_token=…, else $STZ_API_TOKEN (placeholder only for the "build" synth).
-    api_token=resolve_api_token(env_name, app.node.try_get_context("api_token")),
     # Deploy to the account/region of the CLI profile in use (e.g. --profile stz-dev).
     # Spike S2 (#0004) driver/target: never in demo; turn off with -c spike_s2=off.
     spike_s2=env_name != "demo" and app.node.try_get_context("spike_s2") != "off",

@@ -37,7 +37,6 @@ class StzAgentStack(Stack):
         scope: Construct,
         construct_id: str,
         *,
-        api_token: str,
         spike_s2: bool = False,
         model_provider: str = "mock",
         model_name: str = "mock",
@@ -99,6 +98,16 @@ class StzAgentStack(Stack):
             self, "ModelKeys", description="Model API keys JSON; set by a person"
         )
 
+        # Generated at deploy time, so the value is never in the template.
+        api_token_secret = secretsmanager.Secret(
+            self,
+            "ApiToken",
+            description="Doorman bearer token",
+            generate_secret_string=secretsmanager.SecretStringGenerator(
+                password_length=48, exclude_punctuation=True
+            ),
+        )
+
         common_env = {
             "BUCKET_NAME": bucket.bucket_name,
             "DOORMAN_QUEUE_URL": queues["doorman"].queue_url,
@@ -148,7 +157,9 @@ class StzAgentStack(Stack):
             )
 
         # Doorman: HTTP API integrations cap at 30 s.
-        doorman = make_fn("doorman", 128, Duration.seconds(29), {"API_TOKEN": api_token})
+        doorman = make_fn(
+            "doorman", 128, Duration.seconds(29), {"API_TOKEN_SECRET_ARN": api_token_secret.secret_arn}
+        )
         prime_env = {"MODEL_PROVIDER": validate_model_provider(model_provider), "MODEL_NAME": model_name}
         if openai_base_url:
             prime_env["OPENAI_BASE_URL"] = openai_base_url
@@ -181,6 +192,7 @@ class StzAgentStack(Stack):
         bucket.grant_read_write(com)
         bucket.grant_read(doorman)
         secret.grant_read(com)
+        api_token_secret.grant_read(doorman)
         # Bedrock (auth "bedrock", #0025): Com signs with its own role. Cross-region
         # inference profiles fan out, so foundation models are allowed in any region.
         com.add_to_role_policy(
@@ -209,6 +221,7 @@ class StzAgentStack(Stack):
 
         # --- Outputs -------------------------------------------------------
         CfnOutput(self, "ApiUrl", value=api.api_endpoint)
+        CfnOutput(self, "ApiTokenSecretArn", value=api_token_secret.secret_arn)
         CfnOutput(self, "BucketName", value=bucket.bucket_name)
         for key in FUNCTIONS:
             CfnOutput(self, f"{key.capitalize()}FunctionName", value=names[key])

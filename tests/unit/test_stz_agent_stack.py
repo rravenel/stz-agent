@@ -7,7 +7,6 @@ import aws_cdk.assertions as assertions
 import pytest
 from aws_cdk.assertions import Match
 
-from stz_agent.config import BUILD_PLACEHOLDER_TOKEN, resolve_api_token
 from stz_agent.stz_agent_stack import StzAgentStack
 
 STACK = "StzAgent-test"
@@ -17,7 +16,7 @@ NAMES = {f: f"{STACK}-{f}" for f in ("doorman", "prime", "com")}
 @pytest.fixture(scope="module")
 def template():
     app = core.App()
-    stack = StzAgentStack(app, STACK, api_token="test-token")
+    stack = StzAgentStack(app, STACK)
     return assertions.Template.from_stack(stack)
 
 
@@ -144,14 +143,12 @@ def test_function_env_vars(template):
         "PRIME_FUNCTION_NAME",
         "COM_FUNCTION_NAME",
     }
-    extra = {"doorman": {"API_TOKEN"}, "prime": {"MODEL_PROVIDER", "MODEL_NAME"}, "com": {"MODEL_SECRET_ARN"}}
+    extra = {"doorman": {"API_TOKEN_SECRET_ARN"}, "prime": {"MODEL_PROVIDER", "MODEL_NAME"}, "com": {"MODEL_SECRET_ARN"}}
     for key in NAMES:
         _, fn = fn_resource(template, key)
         env = fn["Properties"]["Environment"]["Variables"]
         assert set(env) == common | extra[key], key
         assert env["PRIME_FUNCTION_NAME"] == NAMES["prime"]
-    _, doorman = fn_resource(template, "doorman")
-    assert doorman["Properties"]["Environment"]["Variables"]["API_TOKEN"] == "test-token"
 
 
 def test_prime_async_invoke_config(template):
@@ -182,16 +179,46 @@ def test_invoke_permissions(template):
     assert invoke_targets(template, "com") == {"prime"}
 
 
-def test_only_com_reads_secret(template):
-    holders = []
-    for pid, pol in template.find_resources("AWS::IAM::Policy").items():
+def secret_id(template, construct):
+    found = [i for i in template.find_resources("AWS::SecretsManager::Secret") if i.startswith(construct)]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def secret_readers(template):
+    """Secret logical ID (or raw JSON of any other resource) -> role logical IDs that may read it."""
+    out = {}
+    for pol in template.find_resources("AWS::IAM::Policy").values():
         for s in pol["Properties"]["PolicyDocument"]["Statement"]:
-            if "secretsmanager:GetSecretValue" in as_list(s["Action"]):
-                holders.append(pol)
-    assert len(holders) == 1
-    _, com = fn_resource(template, "com")
-    role_ref = com["Properties"]["Role"]["Fn::GetAtt"][0]
-    assert {"Ref": role_ref} in holders[0]["Properties"]["Roles"]
+            if not any(fnmatchcase("secretsmanager:getsecretvalue", a.lower()) for a in as_list(s["Action"])):
+                continue
+            for r in as_list(s["Resource"]):
+                key = r["Ref"] if isinstance(r, dict) and "Ref" in r else json.dumps(r)
+                out.setdefault(key, set()).update(x["Ref"] for x in pol["Properties"]["Roles"])
+    return out
+
+
+def role_of(template, key):
+    return fn_resource(template, key)[1]["Properties"]["Role"]["Fn::GetAtt"][0]
+
+
+def test_each_secret_has_one_reader(template):
+    assert secret_readers(template) == {
+        secret_id(template, "ModelKeys"): {role_of(template, "com")},
+        secret_id(template, "ApiToken"): {role_of(template, "doorman")},
+    }
+
+
+def test_api_token_is_generated_and_never_in_the_template(template):
+    tok = secret_id(template, "ApiToken")
+    props = template.find_resources("AWS::SecretsManager::Secret")[tok]["Properties"]
+    assert props["GenerateSecretString"] == {"ExcludePunctuation": True, "PasswordLength": 48}
+    assert "SecretString" not in props
+    text = json.dumps(template.to_json())
+    assert "test-token" not in text and "build-placeholder" not in text
+    assert '"API_TOKEN"' not in text
+    _, doorman = fn_resource(template, "doorman")
+    assert doorman["Properties"]["Environment"]["Variables"]["API_TOKEN_SECRET_ARN"] == {"Ref": tok}
 
 
 QUEUE_CONSTRUCTS = {"doorman": "DoormanMessages", "prime": "PrimeMessages", "com": "ComMessages"}
@@ -260,21 +287,8 @@ def test_http_api_routes(template):
 
 def test_outputs(template):
     outputs = template.find_outputs("*")
-    for key in ("ApiUrl", "BucketName", "DoormanFunctionName", "PrimeFunctionName", "ComFunctionName"):
+    for key in ("ApiUrl", "ApiTokenSecretArn", "BucketName", "DoormanFunctionName", "PrimeFunctionName", "ComFunctionName"):
         assert key in outputs
-
-
-# --- Token resolution ---------------------------------------------------
-
-
-def test_resolve_api_token(monkeypatch):
-    monkeypatch.delenv("STZ_API_TOKEN", raising=False)
-    assert resolve_api_token("build", None) == BUILD_PLACEHOLDER_TOKEN
-    assert resolve_api_token("rene", "ctx") == "ctx"
-    with pytest.raises(ValueError):
-        resolve_api_token("rene", None)
-    monkeypatch.setenv("STZ_API_TOKEN", "envtok")
-    assert resolve_api_token("rene", None) == "envtok"
 
 
 # --- Spike S2 (#0004) ---------------------------------------------------
@@ -285,7 +299,7 @@ S2 = {"s2-target": f"{STACK}-s2-target", "s2-driver": f"{STACK}-s2-driver"}
 @pytest.fixture(scope="module")
 def spike_template():
     app = core.App()
-    stack = StzAgentStack(app, STACK, api_token="test-token", spike_s2=True)
+    stack = StzAgentStack(app, STACK, spike_s2=True)
     return assertions.Template.from_stack(stack)
 
 
@@ -374,7 +388,7 @@ def test_spike_s2_has_no_sqs(spike_template):
 
 def test_spike_s2_keeps_core_tests(spike_template):
     test_queue_permissions(spike_template)
-    test_only_com_reads_secret(spike_template)
+    test_each_secret_has_one_reader(spike_template)
     test_invoke_permissions(spike_template)
 
 
@@ -398,7 +412,6 @@ def test_model_config_passes_through():
     stack = StzAgentStack(
         app,
         STACK,
-        api_token="t",
         model_provider="openai",
         model_name="gpt-x",
         openai_base_url="https://llm.example/v1",
@@ -416,7 +429,7 @@ def test_model_config_passes_through():
 
 def test_invalid_model_provider_raises():
     with pytest.raises(ValueError, match="model_provider"):
-        StzAgentStack(core.App(), STACK, api_token="t", model_provider="gemini")
+        StzAgentStack(core.App(), STACK, model_provider="gemini")
 
 
 # --- Bedrock (#0025) ------------------------------------------------------

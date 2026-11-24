@@ -13,7 +13,8 @@ export interface PrimeInvoker {
 export type Log = (o: object) => void;
 
 export interface Deps {
-  token: string;
+  /** The bearer token; loaded on first use. */
+  token: () => Promise<string>;
   /** Ports for a fresh CommsCore per POST /messages. */
   comms?: () => { queue: QueuePort; wake: WakePort };
   prime?: PrimeInvoker;
@@ -31,7 +32,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function route(deps: Deps, event: HttpEvent): Promise<HttpResponse> {
   const req = parseRequest(event);
-  if (!authorized(req, deps.token)) return json(401, { error: "unauthorized" });
+  let token: string;
+  try {
+    token = await deps.token();
+  } catch (e) {
+    // The error's name only: never anything that could carry secret material.
+    deps.log({ kind: "auth-unavailable", error: e instanceof Error ? e.name : "unknown" });
+    return json(503, { error: "auth unavailable" });
+  }
+  if (!authorized(req, token)) return json(401, { error: "unauthorized" });
   const at = `${req.method} ${req.path}`;
   if (at === "POST /messages") {
     const p = parseJson(req.body);

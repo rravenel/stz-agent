@@ -10,7 +10,7 @@ let wake: FakeWake;
 let logs: object[];
 
 function deps(extra: Partial<Deps> = {}): Deps {
-  return { token: TOKEN, comms: () => ({ queue: fq.port("doorman"), wake }), log: (o) => logs.push(o), ...extra };
+  return { token: async () => TOKEN, comms: () => ({ queue: fq.port("doorman"), wake }), log: (o) => logs.push(o), ...extra };
 }
 
 /** Fake Prime: after delayMs, ack every user.message in prime's queue. */
@@ -111,6 +111,25 @@ test("auth: 401 on every route without the right token; token never logged", asy
   await flush();
   assert.ok(!JSON.stringify(logs).includes(TOKEN));
   assert.equal(fq.pending("prime").length, 0);
+});
+
+test("auth: a failed token load is 503 on every route, then a retry succeeds; nothing secret is logged", async () => {
+  let fail = true;
+  const d = deps({
+    token: async () => {
+      if (fail) throw new Error(`denied ${TOKEN}`);
+      return TOKEN;
+    },
+    prime: { invoke: async () => ({ ok: true, StatusCode: 200 }) },
+  });
+  for (const [m, p] of [["POST", "/messages"], ["POST", "/wake"], ["GET", "/events"]] as const) {
+    const r = await route(d, ev(m, p));
+    assert.equal(r.statusCode, 503);
+    assert.deepEqual(JSON.parse(r.body), { error: "auth unavailable" });
+  }
+  assert.ok(!JSON.stringify(logs).includes(TOKEN));
+  fail = false;
+  assert.equal((await route(d, ev("POST", "/wake"))).statusCode, 202);
 });
 
 test("POST /wake: always 202, payload {reason: prewake}, no message sent", async () => {
