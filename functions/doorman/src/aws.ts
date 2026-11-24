@@ -68,11 +68,11 @@ export async function loadTokenSecret(arn: string, client = new SecretsManagerCl
   return r.SecretString;
 }
 
-export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): Deps {
+export function depsFromEnv(env: NodeJS.ProcessEnv = process.env, secrets?: SecretsManagerClient): Deps {
   const ports = commsFromEnv("doorman", env); // SDK clients are reused across requests
   const tokenArn = need(env, "API_TOKEN_SECRET_ARN");
   return {
-    token: cachedSecret(() => loadTokenSecret(tokenArn)),
+    token: cachedSecret(() => loadTokenSecret(tokenArn, secrets)),
     comms: () => ports,
     prime: new LambdaPrimeInvoker(need(env, "PRIME_FUNCTION_NAME")),
     store: new S3LogStore(need(env, "BUCKET_NAME")),

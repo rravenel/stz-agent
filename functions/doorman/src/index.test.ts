@@ -35,3 +35,20 @@ test("loadTokenSecret: reads SecretString; an empty secret is an error", async (
   assert.equal(await loadTokenSecret("arn", client("tok")), "tok");
   await assert.rejects(loadTokenSecret("arn", client()), /empty/);
 });
+
+test("depsFromEnv: the token is the secret's value, read once from the configured ARN", async () => {
+  const ids: string[] = [];
+  const client = { send: async (c: { input: { SecretId: string } }) => (ids.push(c.input.SecretId), { SecretString: "the-secret" }) } as never;
+  const url = (q: string) => `https://q/${q}`;
+  const d = depsFromEnv(
+    {
+      API_TOKEN_SECRET_ARN: "arn:t", BUCKET_NAME: "b",
+      DOORMAN_QUEUE_URL: url("d"), PRIME_QUEUE_URL: url("p"), COM_QUEUE_URL: url("c"),
+      DOORMAN_FUNCTION_NAME: "d", PRIME_FUNCTION_NAME: "p", COM_FUNCTION_NAME: "c",
+    },
+    client,
+  );
+  assert.equal(await d.token(), "the-secret");
+  assert.equal(await d.token(), "the-secret");
+  assert.deepEqual(ids, ["arn:t"]);
+});

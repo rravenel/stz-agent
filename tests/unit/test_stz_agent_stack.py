@@ -209,6 +209,17 @@ def test_each_secret_has_one_reader(template):
     }
 
 
+def test_roles_get_access_only_from_inline_iam_policies(template):
+    # The IAM tests read AWS::IAM::Policy only, so nothing may grant access any other way.
+    for kind in ("AWS::IAM::ManagedPolicy", "AWS::SQS::QueuePolicy", "AWS::SecretsManager::ResourcePolicy"):
+        template.resource_count_is(kind, 0)
+    for rid, role in template.find_resources("AWS::IAM::Role").items():
+        props = role["Properties"]
+        assert "Policies" not in props, rid
+        for arn in props.get("ManagedPolicyArns", []):
+            assert "service-role/AWSLambdaBasicExecutionRole" in json.dumps(arn), rid
+
+
 def test_api_token_is_generated_and_never_in_the_template(template):
     tok = secret_id(template, "ApiToken")
     props = template.find_resources("AWS::SecretsManager::Secret")[tok]["Properties"]
