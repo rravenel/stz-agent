@@ -7,6 +7,7 @@ import aws_cdk.assertions as assertions
 import pytest
 from aws_cdk.assertions import Match
 
+from stz_agent.config import spike_s1_enabled
 from stz_agent.stz_agent_stack import StzAgentStack
 
 STACK = "StzAgent-test"
@@ -400,6 +401,7 @@ def test_spike_s2_has_no_sqs(spike_template):
 def test_spike_s2_keeps_core_tests(spike_template):
     test_queue_permissions(spike_template)
     test_each_secret_has_one_reader(spike_template)
+    test_roles_get_access_only_from_inline_iam_policies(spike_template)
     test_invoke_permissions(spike_template)
 
 
@@ -482,3 +484,24 @@ def test_spike_s1_only_on_request(template):
     (fn,) = found(t).values()
     assert fn["Properties"]["MemorySize"] == 2048
     assert set(fn["Properties"]["Environment"]["Variables"]) == {"SPIKE_BUCKET"}
+    role = fn["Properties"]["Role"]["Fn::GetAtt"][0]
+    stmts = [
+        s
+        for pol in t.find_resources("AWS::IAM::Policy").values()
+        if {"Ref": role} in pol["Properties"]["Roles"]
+        for s in pol["Properties"]["PolicyDocument"]["Statement"]
+    ]
+    assert stmts
+    assert all(a.startswith("s3:") for s in stmts for a in as_list(s["Action"]))
+    (bucket,) = t.find_resources("AWS::S3::Bucket")
+    arn = {"Fn::GetAtt": [bucket, "Arn"]}
+    assert [s["Resource"] for s in stmts] == [[arn, {"Fn::Join": ["", [arn, "/spikes/s1/*"]]}]]
+    test_queue_permissions(t)
+    test_each_secret_has_one_reader(t)
+    test_roles_get_access_only_from_inline_iam_policies(t)
+
+
+def test_spike_s1_gate():
+    assert spike_s1_enabled("rene", "on")
+    for env, ctx in (("demo", "on"), ("rene", None), ("rene", "off")):
+        assert not spike_s1_enabled(env, ctx)

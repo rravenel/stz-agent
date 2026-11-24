@@ -96,15 +96,16 @@ export class World {
   }
 
   /** Com: answer a request (body to S3, then http.response to Prime's queue). */
-  async respond(requestId: string, body: string, opts: { ok?: boolean; status?: number; error?: string } = {}) {
+  async respond(requestId: string, body: string, opts: { ok?: boolean; status?: number; error?: string; errorBody?: boolean } = {}) {
     const ok = opts.ok ?? true;
     const com = this.bus.connect("com");
     com.onMessage(() => {});
-    if (ok) await this.store.put(responseBodyKey(requestId), body);
+    const stored = ok || opts.errorBody === true;
+    if (stored) await this.store.put(responseBodyKey(requestId), body);
     com.send("prime", "http.response", {
       request_id: requestId,
       ok,
-      ...(ok ? { status: opts.status ?? 200, body_ref: responseBodyKey(requestId), headers: {} } : { error: opts.error ?? "failed" }),
+      ...(stored ? { status: opts.status ?? 200, body_ref: responseBodyKey(requestId), headers: {} } : { error: opts.error ?? "failed" }),
       elapsed_ms: 5,
     });
     await com.stop();

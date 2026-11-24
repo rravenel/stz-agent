@@ -181,3 +181,11 @@ test("deadline path: a message that lands during the checkpoint is absorbed befo
   assert.deepEqual(releasedByStop, [0], "one stop, nothing released");
   assert.deepEqual(w.primeQueue(), []);
 });
+
+test("a failed self-wake for released messages is tried again on the way out", async () => {
+  let n = 0;
+  const w = new World({ wrapComms: releasesOnStop, deps: { selfWake: async () => { if (++n === 1) throw new Error("throttled"); } } });
+  w.say("hi", "u1");
+  await assert.rejects(w.run(), /throttled/);
+  assert.equal(n, 2);
+});

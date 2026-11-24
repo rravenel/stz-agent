@@ -11,7 +11,7 @@ import type { EnvelopeFor } from "../../shared/src/envelope.ts";
 import type { PrimeState } from "../../shared/src/state.ts";
 import type { LogWriter } from "./log.ts";
 import type { Block, Message, ModelAdapter, ModelReply, ToolCallBlock } from "./models/turn.ts";
-import { REPL_TOOL, ModelResponseError } from "./models/turn.ts";
+import { bodyText, REPL_TOOL, ModelResponseError } from "./models/turn.ts";
 import type { InboundResponse, Proxy } from "./proxy.ts";
 import type { EvalResult, FetchRequest, Repl } from "./repl/repl.ts";
 import { requestBodyKey } from "../../shared/src/s3-keys.ts";
@@ -82,6 +82,15 @@ export function normalize(messages: Message[]): Message[] {
 export function toolResultContent(r: Extract<EvalResult, { status: "done" }>): string {
   const s = JSON.stringify({ value: r.value, stdout: r.stdout, stderr: r.stderr, error: r.error });
   return s.length <= TOOL_RESULT_LIMIT ? s : `${s.slice(0, TOOL_RESULT_LIMIT)}… [truncated ${s.length - TOOL_RESULT_LIMIT} chars]`;
+}
+
+const ERROR_BODY_LIMIT = 500;
+
+/** "request failed (HTTP 403): <start of the body>": the body says why. */
+function failure(res: InboundResponse): string {
+  const status = res.status ? ` (HTTP ${res.status})` : "";
+  const why = bodyText(res.body).trim().slice(0, ERROR_BODY_LIMIT);
+  return `${res.error ?? "request failed"}${status}${why ? `: ${why}` : ""}`;
 }
 
 export class Harness {
@@ -160,8 +169,12 @@ export class Harness {
     const { adapter, log } = this.o;
     let reply: ModelReply;
     try {
-      if (!res.ok) throw new ModelResponseError(`${res.error ?? "request failed"}${res.status ? ` (HTTP ${res.status})` : ""}`);
+      if (!res.ok) throw new ModelResponseError(failure(res));
       reply = adapter.fromResponse(res.body);
+      // An empty reply would be dropped from the context and the same (billed) call sent again (#0035).
+      if (!reply.content.some((b) => b.type === "tool_call" || b.text.trim() !== "")) {
+        throw new ModelResponseError(`${adapter.provider}: empty reply (stop ${reply.stop})`);
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       await log.append("error", { corr_id: res.requestId, body: { where: "model.response", message } });

@@ -143,6 +143,32 @@ test("a failed model call is logged, ends the turn visibly, and is not retried",
   assert.match((ctx.at(-1)!.content[0] as { text: string }).text, /model call failed: timeout/);
 });
 
+test("a non-2xx model response reports the start of its body", async () => {
+  const w = new World();
+  w.say("hi", "u1");
+  await w.run();
+  const [m1] = await w.takeRequests();
+  await w.respond(m1!.body.request_id, '{"message":"Access denied"}' + "x".repeat(2000), { ok: false, status: 403, errorBody: true });
+  await w.run();
+  const text = (((await w.state()).model_context as Message[]).at(-1)!.content[0] as { text: string }).text;
+  assert.match(text, /request failed \(HTTP 403\): \{"message":"Access denied"\}/);
+  assert.ok(text.length < 700, "capped");
+});
+
+test("an empty model reply ends the turn visibly and is not sent again", async () => {
+  for (const content of [[], [{ type: "text", text: " " }], [{ type: "thinking", thinking: "hm" }]]) {
+    const w = new World();
+    w.say("hi", "u1");
+    await w.run();
+    const [m1] = await w.takeRequests();
+    await w.respond(m1!.body.request_id, anthropic(content, "max_tokens"));
+    await w.run();
+    assert.deepEqual(await w.takeRequests(), [], "no billed retry loop");
+    const last = ((await w.state()).model_context as Message[]).at(-1)!;
+    assert.match((last.content[0] as { text: string }).text, /empty reply \(stop max_tokens\)/);
+  }
+});
+
 test("a failed REPL fetch rejects inside the REPL and comes back as the tool result", async () => {
   const w = new World();
   w.say("go", "u1");

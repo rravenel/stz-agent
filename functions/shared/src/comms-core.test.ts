@@ -531,7 +531,10 @@ test("stop: waits for a finalPoll in flight", async () => {
   p.onMessage(() => {});
   void p.finalPoll(1000);
   await flush();
-  const s = p.stop();
+  let done = false;
+  const s = p.stop().then((r) => ((done = true), r));
+  await advance(500);
+  assert.equal(done, false, "the poll is still out");
   fq.push("prime", JSON.stringify(userMsg()));
   assert.deepEqual(await s, { released: 0 });
   assert.equal(fq.items("prime")[0]!.inFlight, false);

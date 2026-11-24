@@ -60,15 +60,17 @@ export async function handler(event: { mode?: string }) {
   const info = { mode: event.mode, cold: wasCold, container, memoryMb: process.env["AWS_LAMBDA_FUNCTION_MEMORY_SIZE"], node: process.version, wasmMs };
   if (event.mode === "snapshot") {
     const { snap, ...r } = await takeSnapshot(wasm);
-    const [, putMs] = await timed(() => s3.send(new PutObjectCommand({ Bucket, Key: KEY, Body: snap })));
+    const [, putMs] = await timed(() => s3.send(new PutObjectCommand({ Bucket, Key: KEY, Body: snap, Metadata: { container, at: new Date().toISOString() } })));
     return { ...info, ...r, snapshotBytes: snap.length, putMs };
   }
   if (event.mode === "restore") {
+    let from: Record<string, string> = {};
     const [snap, getMs] = await timed(async () => {
       const o = await s3.send(new GetObjectCommand({ Bucket, Key: KEY }));
+      from = o.Metadata ?? {};
       return (await o.Body?.transformToByteArray()) ?? new Uint8Array();
     });
-    return { ...info, getMs, ...(await restoreAndCheck(wasm, snap)) };
+    return { ...info, getMs, snapshotAt: from["at"], differentContainer: from["container"] !== container, ...(await restoreAndCheck(wasm, snap)) };
   }
   throw new Error(`mode must be snapshot or restore`);
 }

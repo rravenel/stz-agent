@@ -30,19 +30,22 @@ export interface ComDeps {
   finalPollMs?: number;
   /** Abort in-flight work and exit when less than this much run time is left. */
   exitMarginMs?: number;
+  /** Request ids already accepted, shared across the comms workers of one Lambda run. */
+  seen?: Set<string>;
 }
 
 const KEPT_HEADERS = ["content-type", "request-id", "x-request-id"];
 
 export class ComCore {
   private readonly d: ComDeps;
-  private readonly seen = new Set<string>();
+  private readonly seen: Set<string>;
   private readonly inFlight = new Set<Promise<void>>();
   private readonly runAbort = new AbortController();
   handled = 0;
 
   constructor(deps: ComDeps) {
     this.d = deps;
+    this.seen = deps.seen ?? new Set();
     deps.comms.onMessage((m) => this.accept(m));
   }
 
