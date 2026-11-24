@@ -16,7 +16,7 @@ import {
 } from "./turn.ts";
 
 export interface BedrockOptions {
-  /** Model id or inference-profile id/ARN. */
+  /** Foundation-model id or system inference-profile id (what Com's IAM policy allows). */
   model: string;
   region: string;
 }
@@ -52,7 +52,12 @@ function wireMessages(messages: Message[]): { role: string; content: Record<stri
   return out;
 }
 
-const STOP: Record<string, StopReason> = { end_turn: "end_turn", stop_sequence: "end_turn", tool_use: "tool_use", max_tokens: "max_tokens" };
+const STOP = new Map<string, StopReason>([
+  ["end_turn", "end_turn"],
+  ["stop_sequence", "end_turn"],
+  ["tool_use", "tool_use"],
+  ["max_tokens", "max_tokens"],
+]);
 
 export function bedrockAdapter(opts: BedrockOptions): ModelAdapter {
   const url = `https://bedrock-runtime.${opts.region}.amazonaws.com/model/${encodeURIComponent(opts.model)}/converse`;
@@ -87,10 +92,15 @@ export function bedrockAdapter(opts: BedrockOptions): ModelAdapter {
         }
         // Other block types (reasoningContent, etc.) are not part of the turn.
       }
+      const stop = String(r["stopReason"]);
+      // An empty reply would be dropped from the context and the same (billed) call sent again.
+      if (!content.some((b) => b.type === "tool_call" || b.text.trim() !== "")) {
+        throw new ModelResponseError(`bedrock: empty reply (stop reason ${stop})`);
+      }
       const usage = isRecord(r["usage"]) ? r["usage"] : null;
       return {
         content,
-        stop: STOP[String(r["stopReason"])] ?? "other",
+        stop: STOP.get(stop) ?? "other",
         ...(usage ? { usage: { input_tokens: Number(usage["inputTokens"] ?? 0), output_tokens: Number(usage["outputTokens"] ?? 0) } } : {}),
       };
     },

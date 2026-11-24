@@ -438,6 +438,13 @@ def test_model_config_passes_through():
     assert env_of(t, "com")["MOCK_DELAY_SCALE"] == "0.1"
 
 
+def test_bedrock_is_a_valid_provider():
+    t = assertions.Template.from_stack(
+        StzAgentStack(core.App(), STACK, model_provider="bedrock", model_name="m")
+    )
+    assert env_of(t, "prime")["MODEL_PROVIDER"] == "bedrock"
+
+
 def test_invalid_model_provider_raises():
     with pytest.raises(ValueError, match="model_provider"):
         StzAgentStack(core.App(), STACK, model_provider="gemini")

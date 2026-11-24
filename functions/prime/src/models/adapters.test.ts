@@ -131,7 +131,7 @@ test("adapterFromEnv picks the provider and refuses bad config", () => {
   assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "openai", MODEL_NAME: "m" }), /OPENAI_BASE_URL/);
   assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m" }), /AWS_REGION/);
   assert.match(adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m", AWS_REGION: "us-west-2" }).toRequest(req).url, /us-west-2/);
-  assert.match(adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m", AWS_REGION: "us-west-2", BEDROCK_REGION: "us-east-1" }).toRequest(req).url, /us-east-1/);
+  assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m", AWS_REGION: "evil.com/x" }), /AWS_REGION/);
   assert.throws(() => adapterFromEnv({}), /MODEL_PROVIDER/);
 });
 
@@ -228,4 +228,18 @@ test("bedrock response: errors raised", () => {
   assert.throws(() => bedrock.fromResponse('{"message":"Access denied"}'), /bedrock: Access denied/);
   assert.throws(() => bedrock.fromResponse("{}"), ModelResponseError);
   assert.throws(() => bedrock.fromResponse("nope"), ModelResponseError);
+});
+
+test("bedrock response: stop reasons, odd tool input, Message errors, and empty replies raise", () => {
+  const body = (stopReason: string, content: unknown[] = [{ text: "x" }]) => JSON.stringify({ output: { message: { content } }, stopReason });
+  for (const [wire, stop] of [["end_turn", "end_turn"], ["stop_sequence", "end_turn"], ["tool_use", "tool_use"], ["max_tokens", "max_tokens"], ["guardrail_intervened", "other"], ["constructor", "other"]] as const) {
+    assert.equal(bedrock.fromResponse(body(wire)).stop, stop, wire);
+  }
+  assert.deepEqual(bedrock.fromResponse(body("tool_use", [{ toolUse: { toolUseId: "t", name: "repl", input: "str" } }])).content, [
+    { type: "tool_call", id: "t", name: "repl", input: {} },
+  ]);
+  assert.throws(() => bedrock.fromResponse('{"Message":"Too big"}'), /bedrock: Too big/);
+  for (const empty of [[], [{ reasoningContent: {} }], [{ text: " " }]]) {
+    assert.throws(() => bedrock.fromResponse(body("max_tokens", empty)), /empty reply \(stop reason max_tokens\)/);
+  }
 });

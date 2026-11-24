@@ -4,7 +4,7 @@
 //
 //   MODEL_PROVIDER  anthropic | openai | bedrock | mock
 //   MODEL_NAME      provider's model id (mock: any label)
-//   BEDROCK_REGION  for bedrock; defaults to AWS_REGION (set by Lambda)
+//   AWS_REGION      for bedrock; set by Lambda (Com may only call the stack's region)
 //   OPENAI_BASE_URL required for openai, e.g. https://api.openai.com/v1
 //   OPENAI_MAX_TOKENS_FIELD  max_tokens (default) | max_completion_tokens
 
@@ -36,8 +36,8 @@ export function adapterFromEnv(env: Record<string, string | undefined> = process
       return openaiAdapter({ model, baseUrl, maxTokensField: field });
     }
     case "bedrock": {
-      const region = (env["BEDROCK_REGION"] ?? env["AWS_REGION"] ?? "").trim();
-      if (!/^[a-z0-9-]+$/.test(region)) throw new Error("BEDROCK_REGION or AWS_REGION is required for MODEL_PROVIDER=bedrock");
+      const region = (env["AWS_REGION"] ?? "").trim();
+      if (!/^[a-z]{2}(-[a-z]+)+-\d$/.test(region)) throw new Error("AWS_REGION is required for MODEL_PROVIDER=bedrock");
       return bedrockAdapter({ model, region });
     }
     default:

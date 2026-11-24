@@ -57,3 +57,23 @@ test("NodeSha256: hash, HMAC and reset", async () => {
   m.update("The quick brown fox jumps over the lazy dog");
   assert.equal(hex(await m.digest()), "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8");
 });
+
+test("signBedrock: model ids with ':' and '/' are escaped twice in the canonical path", async () => {
+  const { createHash, createHmac } = await import("node:crypto");
+  const now = new Date("2026-11-21T00:00:00Z");
+  const credentials = { accessKeyId: "AKID", secretAccessKey: "SECRET" };
+  const hash = (s: string) => createHash("sha256").update(s).digest("hex");
+  const hmac = (k: string | Buffer, s: string) => createHmac("sha256", k).update(s).digest();
+  for (const id of ["us.vendor.model-v1:0", "arn:aws:bedrock:us-west-2:1:inference-profile/us.m"]) {
+    const path = `/model/${encodeURIComponent(id)}/converse`;
+    const h = await signBedrock({ method: "POST", url: `https://bedrock-runtime.us-west-2.amazonaws.com${path}`, headers: {}, body: "{}" }, { credentials, now });
+    const auth = h["authorization"]!;
+    const signed = /SignedHeaders=([^,]+)/.exec(auth)![1]!;
+    const canonPath = path.split("/").map(encodeURIComponent).join("/");
+    const canonical = ["POST", canonPath, "", ...signed.split(";").map((k) => `${k}:${h[k]}`), "", signed, hash("{}")].join("\n");
+    const scope = "20261121/us-west-2/bedrock/aws4_request";
+    const key = ["us-west-2", "bedrock", "aws4_request"].reduce<Buffer>((k, s) => hmac(k, s), hmac("AWS4SECRET", "20261121"));
+    const want = hmac(key, ["AWS4-HMAC-SHA256", "20261121T000000Z", scope, hash(canonical)].join("\n")).toString("hex");
+    assert.ok(auth.endsWith(`Signature=${want}`), id);
+  }
+});
