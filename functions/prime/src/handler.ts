@@ -138,8 +138,8 @@ export function createHandler(deps: PrimeDeps) {
     let woke = false;
     const selfWake = async () => {
       if (!deps.selfWake) throw new Error("messages or work left for a next run but no selfWake is configured");
-      woke = true;
       await deps.selfWake({ reason: "continue" });
+      woke = true;
     };
     /** Released messages were acked, so nobody else will wake Prime for them (#0029). */
     const wakeIfReleased = async () => {
@@ -254,6 +254,8 @@ export function createHandler(deps: PrimeDeps) {
           return false;
         };
         if (pastDeadline()) {
+          // Never stop with a non-empty inbox: stop() would release what we hold a copy of.
+          if (inbox.length) continue;
           if (!(await exitNow())) continue;
           // Continuation (spec §5.5): the self-wake is the very last action.
           await log.lifecycle("exit_deadline", { elapsed_ms: elapsed(), runnable: harness.runnable() });

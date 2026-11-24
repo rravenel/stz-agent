@@ -5,7 +5,7 @@
 
 import { ChangeMessageVisibilityCommand, DeleteMessageCommand, ReceiveMessageCommand, SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
-import type { QueuePort, WakePort, WakeResult } from "./comms-core.ts";
+import type { QueuePort, Received, WakePort, WakeResult } from "./comms-core.ts";
 import type { Endpoint, Envelope } from "./envelope.ts";
 
 export class SqsQueuePort implements QueuePort {
@@ -18,11 +18,13 @@ export class SqsQueuePort implements QueuePort {
     this.client = client ?? new SQSClient({});
   }
 
-  async receive(waitSeconds: number): Promise<{ body: string; receipt: string }[]> {
+  async receive(waitSeconds: number): Promise<Received[]> {
     const r = await this.client.send(
-      new ReceiveMessageCommand({ QueueUrl: this.urls[this.self], WaitTimeSeconds: waitSeconds, MaxNumberOfMessages: 10 }),
+      new ReceiveMessageCommand({ QueueUrl: this.urls[this.self], WaitTimeSeconds: waitSeconds, MaxNumberOfMessages: 10, MessageSystemAttributeNames: ["ApproximateReceiveCount"] }),
     );
-    return (r.Messages ?? []).flatMap((m) => (m.ReceiptHandle ? [{ body: m.Body ?? "", receipt: m.ReceiptHandle }] : []));
+    return (r.Messages ?? []).flatMap((m) => 
+      m.ReceiptHandle ? [{ body: m.Body ?? "", receipt: m.ReceiptHandle, receives: Number(m.Attributes?.ApproximateReceiveCount ?? 1) }] : [],
+    );
   }
 
   async send(to: Endpoint, msg: Envelope): Promise<void> {

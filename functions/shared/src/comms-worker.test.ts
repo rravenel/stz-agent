@@ -55,3 +55,10 @@ test("WorkerComms (memory mode): stop() reports an undeleted delivery; one that 
   assert.equal(delivered, 0);
   assert.ok(r.released <= 1);
 });
+
+test("WorkerComms: calls on a stopped (dead) worker reject instead of hanging", async () => {
+  const c = new WorkerComms("prime", { mode: "memory", comms: { tickMs: 20, pollWaitSeconds: 1 }, log: () => {} });
+  c.onMessage(() => {});
+  await c.stop();
+  await assert.rejects(c.stop(), /exited/);
+});

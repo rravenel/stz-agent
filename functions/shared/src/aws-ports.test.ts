@@ -16,15 +16,15 @@ function stub<C>(reply: (cmd: { constructor: { name: string }; input: any }, opt
 
 test("SqsQueuePort: receive/send/delete hit the right queues", async () => {
   const { client, calls } = stub<SQSClient>((c) =>
-    c.constructor.name === "ReceiveMessageCommand" ? { Messages: [{ Body: "x", ReceiptHandle: "r1" }, { Body: "no-receipt" }] } : {},
+    c.constructor.name === "ReceiveMessageCommand" ? { Messages: [{ Body: "x", ReceiptHandle: "r1", Attributes: { ApproximateReceiveCount: "3" } }, { Body: "no-receipt" }] } : {},
   );
   const q = new SqsQueuePort(urls, "com", client);
-  assert.deepEqual(await q.receive(5), [{ body: "x", receipt: "r1" }]);
+  assert.deepEqual(await q.receive(5), [{ body: "x", receipt: "r1", receives: 3 }]);
   const msg = makeEnvelope("user.message", "com", "prime", { text: "hi" }) as Envelope;
   await q.send("prime", msg);
   await q.delete("r1");
   await q.release("r1");
-  assert.deepEqual(calls[0]!.input, { QueueUrl: "q/c", WaitTimeSeconds: 5, MaxNumberOfMessages: 10 });
+  assert.deepEqual(calls[0]!.input, { QueueUrl: "q/c", WaitTimeSeconds: 5, MaxNumberOfMessages: 10, MessageSystemAttributeNames: ["ApproximateReceiveCount"] });
   assert.deepEqual(calls[1]!.input, { QueueUrl: "q/p", MessageBody: JSON.stringify(msg) });
   assert.deepEqual(calls[2]!.input, { QueueUrl: "q/c", ReceiptHandle: "r1" });
   assert.equal(calls[3]!.name, "ChangeMessageVisibilityCommand");

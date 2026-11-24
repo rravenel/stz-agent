@@ -66,6 +66,7 @@ export class WorkerComms implements Comms {
   private readonly unacked = new UnackedTracker();
   private nextId = 1;
   private stopping = false;
+  private dead: Error | null = null;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
   constructor(self: Endpoint, opts: { mode?: WorkerMode; comms?: Partial<CommsOptions>; log?: (e: LogEvent) => void } = {}) {
@@ -137,6 +138,7 @@ export class WorkerComms implements Comms {
   }
 
   private rejectAll(e: Error): void {
+    this.dead ??= e;
     for (const p of this.pending.values()) p.reject(e);
     this.pending.clear();
   }
@@ -146,6 +148,7 @@ export class WorkerComms implements Comms {
   }
 
   private call(make: (id: number) => ToWorker): Promise<unknown> {
+    if (this.dead) return Promise.reject(this.dead); // nobody is left to answer
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });

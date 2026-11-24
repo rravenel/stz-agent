@@ -149,3 +149,35 @@ test("a run that throws releases what it received, wakes once and keeps the orig
   assert.deepEqual(wakes, ["continue"]);
   assert.equal(w.primeQueue().length, 1, "still queued for the next run");
 });
+
+test("deadline path: a message that lands during the checkpoint is absorbed before stop(), never released", async () => {
+  let clock = Date.parse("2026-11-21T00:00:00Z");
+  const slow: ModelAdapter = {
+    provider: adapter.provider,
+    toRequest: (req) => { clock += 12.5 * 60_000; return adapter.toRequest(req); },
+    fromResponse: (b) => adapter.fromResponse(b),
+  };
+  let w!: World;
+  let said = false;
+  const releasedByStop: number[] = [];
+  w = new World({
+    now: () => new Date(clock),
+    wrapStore: (s) => ({
+      get: (k) => s.get(k),
+      list: (p) => s.list(p),
+      put: async (k, b) => { if (!said && k.includes("state")) { said = true; w.say("late", "u2"); await new Promise((r) => setImmediate(r)); } return s.put(k, b); },
+      putIfAbsent: (k, b) => s.putIfAbsent(k, b),
+      delete: (k) => s.delete(k),
+    }),
+    wrapComms: (c) => ({ ...bind(c), stop: async () => { const r = await c.stop(); releasedByStop.push(r.released); return r; } }),
+    deps: { adapter: slow, selfWake: async () => {} },
+  });
+  w.say("first", "u1");
+  const r = await w.run();
+  assert.equal(said, true);
+  assert.equal(r.exit, "deadline");
+  assert.equal(r.processed, 2);
+  assert.equal(r.duplicates, 0);
+  assert.deepEqual(releasedByStop, [0], "one stop, nothing released");
+  assert.deepEqual(w.primeQueue(), []);
+});

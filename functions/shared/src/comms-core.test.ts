@@ -492,3 +492,47 @@ test("stop: a failed release is logged and not counted", async () => {
   assert.deepEqual(await s, { released: 0 });
   assert.ok(log.some((e) => e.kind === "release-failed"));
 });
+
+test("stop: a redelivered message is counted: an earlier run may have acked it", async () => {
+  const fq = new FakeQueue();
+  const port = fq.port("prime");
+  const p = new CommsCore("prime", { ...port, receive: async (w) => (await port.receive(w)).map((m) => ({ ...m, receives: 2 })) }, new FakeWake()).start();
+  cores.push(p);
+  p.onMessage(() => {});
+  await flush();
+  const s = p.stop();
+  fq.push("prime", JSON.stringify(userMsg()));
+  assert.deepEqual(await s, { released: 1 });
+});
+
+test("stop: waits for a pending delete, and releases when that delete fails", async () => {
+  const fq = new FakeQueue();
+  const got: Delivery[] = [];
+  let fail!: () => void;
+  const gate = new Promise<void>((_, rej) => (fail = () => rej(new Error("delete failed"))));
+  const p = new CommsCore("prime", { ...fq.port("prime"), delete: () => gate }, new FakeWake()).start();
+  cores.push(p);
+  p.onMessage((d) => got.push(d));
+  fq.push("prime", JSON.stringify(userMsg()));
+  await advance(300);
+  const del = assert.rejects(p.deleteMessage(got[0]!.receipt), /delete failed/);
+  let done = false;
+  const s = p.stop().then((r) => ((done = true), r));
+  await advance(2500);
+  assert.equal(done, false, "still waiting for the delete");
+  fail();
+  await del;
+  assert.deepEqual(await s, { released: 1 });
+});
+
+test("stop: waits for a finalPoll in flight", async () => {
+  const fq = new FakeQueue();
+  const p = new CommsCore("prime", fq.port("prime"), new FakeWake());
+  p.onMessage(() => {});
+  void p.finalPoll(1000);
+  await flush();
+  const s = p.stop();
+  fq.push("prime", JSON.stringify(userMsg()));
+  assert.deepEqual(await s, { released: 0 });
+  assert.equal(fq.items("prime")[0]!.inFlight, false);
+});

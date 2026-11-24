@@ -5,9 +5,16 @@
 import type { Comms, Delivery, StopResult } from "./comms.ts";
 import { makeAck, makeEnvelope, parseEnvelope, type BodyByType, type Endpoint, type Envelope, type MakeOptions, type MessageType } from "./envelope.ts";
 
+export interface Received {
+  body: string;
+  receipt: string;
+  /** Times this message has been received, this one included. Default 1. */
+  receives?: number;
+}
+
 export interface QueuePort {
   /** Long-poll own queue for up to waitSeconds. */
-  receive(waitSeconds: number): Promise<{ body: string; receipt: string }[]>;
+  receive(waitSeconds: number): Promise<Received[]>;
   send(to: Endpoint, msg: Envelope): Promise<void>;
   delete(receipt: string): Promise<void>;
   /** Make a received message visible again at once. */
@@ -125,6 +132,8 @@ export class CommsCore implements Comms {
   private held: Delivery[] = [];
   /** Acked and not yet deleted: receipt → msg_id. */
   private readonly undeleted = new Map<string, string>();
+  private releasedRedeliveries = 0;
+  private readonly polls = new Set<Promise<void>>();
   private readonly deletes = new Set<Promise<void>>();
   private stopping: Promise<StopResult> | null = null;
   private readonly outbox: Envelope[] = [];
@@ -220,6 +229,7 @@ export class CommsCore implements Comms {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     await this.polling;
+    await Promise.allSettled([...this.polls]); // a finalPoll still in flight
     while (this.deletes.size) {
       await Promise.allSettled([...this.deletes]);
       await Promise.resolve(); // let deleteMessage settle its bookkeeping
@@ -228,7 +238,7 @@ export class CommsCore implements Comms {
     const left = [...this.undeleted];
     this.undeleted.clear();
     const done = await Promise.all(left.map(([receipt, msgId]) => this.tryRelease(receipt, msgId, "undeleted")));
-    return { released: done.filter(Boolean).length };
+    return { released: this.releasedRedeliveries + done.filter(Boolean).length };
   }
 
   private async tryRelease(receipt: string, msgId: string, reason: "stopping" | "undeleted"): Promise<boolean> {
@@ -271,8 +281,14 @@ export class CommsCore implements Comms {
     while (!this.stopped) await this.pollOnce(this.opts.pollWaitSeconds);
   }
 
-  private async pollOnce(waitSeconds: number): Promise<void> {
-    let batch: { body: string; receipt: string }[];
+  private pollOnce(waitSeconds: number): Promise<void> {
+    const p = this.doPoll(waitSeconds).finally(() => this.polls.delete(p));
+    this.polls.add(p);
+    return p;
+  }
+
+  private async doPoll(waitSeconds: number): Promise<void> {
+    let batch: Received[];
     try {
       batch = await this.queue.receive(waitSeconds);
     } catch (e) {
@@ -280,10 +296,10 @@ export class CommsCore implements Comms {
       await new Promise((r) => setTimeout(r, this.opts.tickMs));
       return;
     }
-    for (const m of batch) await this.handle(m.body, m.receipt);
+    for (const m of batch) await this.handle(m);
   }
 
-  private async handle(raw: string, receipt: string): Promise<void> {
+  private async handle({ body: raw, receipt, receives = 1 }: Received): Promise<void> {
     const r = parseEnvelope(raw);
     if (!r.ok) {
       this.log({ kind: "poison", error: r.error });
@@ -298,7 +314,9 @@ export class CommsCore implements Comms {
     }
     if (this.stopped) {
       // No ack: the sender keeps responsibility and wakes us again (protocol §9B).
-      await this.tryRelease(receipt, msg.msg_id, "stopping");
+      // But a redelivery may have been acked by an earlier run, whose sender has
+      // stopped waking: count it, so the consumer wakes itself.
+      if ((await this.tryRelease(receipt, msg.msg_id, "stopping")) && receives > 1) this.releasedRedeliveries++;
       return;
     }
     const deadline = this.opts.acceptDeadlineAtMs;

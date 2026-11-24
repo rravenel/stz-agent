@@ -42,7 +42,7 @@ export interface Comms {
   /**
    * Stop polling and the delivery monitor. A message that arrives from now on
    * is neither acked nor handed over. Messages already acked but never deleted
-   * are released; `released` counts them. Their senders won't wake this
+   * (by this run or an earlier one) are released; `released` counts them. Their senders won't wake this
    * function again, so a consumer that gets a non-zero count must.
    */
   stop(): Promise<StopResult>;
