@@ -468,3 +468,17 @@ def test_only_com_invokes_bedrock(template):
     assert len(res) == 2
     for key in ("prime", "doorman"):
         assert bedrock_statements(template, key) == [], key
+
+
+# --- Spike S1 (#0020) -----------------------------------------------------
+
+
+def test_spike_s1_only_on_request(template):
+    def found(t):
+        return t.find_resources("AWS::Lambda::Function", {"Properties": {"FunctionName": f"{STACK}-s1-spike"}})
+
+    assert not found(template)
+    t = assertions.Template.from_stack(StzAgentStack(core.App(), STACK, spike_s1=True))
+    (fn,) = found(t).values()
+    assert fn["Properties"]["MemorySize"] == 2048
+    assert set(fn["Properties"]["Environment"]["Variables"]) == {"SPIKE_BUCKET"}

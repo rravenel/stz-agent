@@ -38,6 +38,7 @@ class StzAgentStack(Stack):
         construct_id: str,
         *,
         spike_s2: bool = False,
+        spike_s1: bool = False,
         model_provider: str = "mock",
         model_name: str = "mock",
         openai_base_url: Optional[str] = None,
@@ -208,6 +209,20 @@ class StzAgentStack(Stack):
         # --- Spike S2 (#0004): driver + target, not in demo --------------------
         if spike_s2:
             self._add_spike_s2(make_fn, bucket)
+
+        # --- Spike S1 (#0020): off unless asked for ------------------------------
+        if spike_s1:
+            s1 = make_fn(
+                "s1spike",
+                2048,
+                Duration.seconds(60),
+                {},
+                name=f"{self.stack_name}-s1-spike",
+                reserved=None,
+                env={"SPIKE_BUCKET": bucket.bucket_name},
+            )
+            bucket.grant_read_write(s1, "spikes/s1/*")
+            CfnOutput(self, "S1SpikeFunctionName", value=s1.function_name)
 
         # --- HTTP API ------------------------------------------------------
         api = apigwv2.HttpApi(self, "Api")

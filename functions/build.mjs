@@ -5,7 +5,7 @@ import { copyFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
-const functions = ["doorman", "prime", "com", "s2spike"];
+const functions = ["doorman", "prime", "com", "s2spike", "s1spike"];
 
 rmSync(`${root}dist`, { recursive: true, force: true });
 await Promise.all(
@@ -31,3 +31,4 @@ await Promise.all(
 
 // Prime loads the pinned QuickJS build from next to its bundle (prime/src/repl/wasm.ts).
 copyFileSync(`${root}prime/vendor/qjs-wasi-reactor.wasm`, `${root}dist/prime/qjs-wasi-reactor.wasm`);
+copyFileSync(`${root}prime/vendor/qjs-wasi-reactor.wasm`, `${root}dist/s1spike/qjs-wasi-reactor.wasm`);

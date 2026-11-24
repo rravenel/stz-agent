@@ -22,6 +22,8 @@ stack = StzAgentStack(
     # Deploy to the account/region of the CLI profile in use (e.g. --profile stz-dev).
     # Spike S2 (#0004) driver/target: never in demo; turn off with -c spike_s2=off.
     spike_s2=env_name != "demo" and app.node.try_get_context("spike_s2") != "off",
+    # Spike S1 in Lambda (#0020): only with -c spike_s1=on, never in demo.
+    spike_s1=env_name != "demo" and app.node.try_get_context("spike_s1") == "on",
     # Prime's model: -c model_provider=mock|anthropic|openai|bedrock -c model_name=… [-c openai_base_url=…].
     model_provider=app.node.try_get_context("model_provider") or "mock",
     model_name=app.node.try_get_context("model_name") or "mock",
