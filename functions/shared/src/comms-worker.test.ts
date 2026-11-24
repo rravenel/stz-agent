@@ -38,3 +38,20 @@ test("UnackedTracker: ignores an out-of-order older push", () => {
   u.push(1, 1);
   assert.equal(u.count(), 2);
 });
+
+test("WorkerComms (memory mode): stop() reports an undeleted delivery; one that races stop() never reaches the handler", async () => {
+  const opts = { mode: "memory" as const, comms: { tickMs: 20, pollWaitSeconds: 1 }, log: () => {} };
+  const a = new WorkerComms("prime", opts);
+  const got = new Promise<Delivery>((r) => a.onMessage(r));
+  a.send("prime", "user.message", { text: "kept" });
+  await got;
+  assert.deepEqual(await a.stop(), { released: 1 });
+
+  const b = new WorkerComms("prime", opts);
+  let delivered = 0;
+  b.onMessage(() => delivered++);
+  b.send("prime", "user.message", { text: "races" });
+  const r = await b.stop();
+  assert.equal(delivered, 0);
+  assert.ok(r.released <= 1);
+});

@@ -6,7 +6,7 @@
 
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
-import type { Comms, Delivery } from "./comms.ts";
+import type { Comms, Delivery, StopResult } from "./comms.ts";
 import { fromEnv } from "./aws-ports.ts";
 import { CommsCore, type CommsOptions, type LogEvent, type QueuePort, type WakePort } from "./comms-core.ts";
 import { makeEnvelope, type BodyByType, type Endpoint, type Envelope, type MakeOptions, type MessageType } from "./envelope.ts";
@@ -23,6 +23,7 @@ interface WorkerInit {
 type ToWorker =
   | { op: "send"; msg: Envelope }
   | { op: "delete"; id: number; receipt: string }
+  | { op: "release"; id: number; receipt: string }
   | { op: "finalPoll"; id: number; graceMs: number }
   | { op: "stop"; id: number };
 
@@ -64,6 +65,7 @@ export class WorkerComms implements Comms {
   private readonly held: Delivery[] = [];
   private readonly unacked = new UnackedTracker();
   private nextId = 1;
+  private stopping = false;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
   constructor(self: Endpoint, opts: { mode?: WorkerMode; comms?: Partial<CommsOptions>; log?: (e: LogEvent) => void } = {}) {
@@ -74,6 +76,8 @@ export class WorkerComms implements Comms {
     this.worker.on("message", (m: FromWorker) => {
       switch (m.op) {
         case "delivery":
+          // Raced stop(): the worker still tracks it, so its stop() releases and counts it.
+          if (this.stopping) break;
           if (this.handler) this.handler(m.delivery);
           else this.held.push(m.delivery);
           break;
@@ -120,9 +124,16 @@ export class WorkerComms implements Comms {
     return (await this.call((id) => ({ op: "finalPoll", id, graceMs }))) as boolean;
   }
 
-  async stop(): Promise<void> {
-    await this.call((id) => ({ op: "stop", id }));
+  async release(receipt: string): Promise<void> {
+    await this.call((id) => ({ op: "release", id, receipt }));
+  }
+
+  async stop(): Promise<StopResult> {
+    this.stopping = true;
+    this.held.length = 0;
+    const r = (await this.call((id) => ({ op: "stop", id }))) as StopResult;
     await this.worker.terminate();
+    return r;
   }
 
   private rejectAll(e: Error): void {
@@ -146,6 +157,7 @@ export class WorkerComms implements Comms {
 /** In-worker fake ports for mode "memory": one queue, every message loops back to self. */
 export function memoryPorts(): { queue: QueuePort; wake: WakePort } {
   const q: { body: string; receipt: string }[] = [];
+  const inFlight = new Map<string, { body: string; receipt: string }>();
   let n = 0;
   let notify: (() => void) | null = null;
   const queue: QueuePort = {
@@ -160,13 +172,24 @@ export function memoryPorts(): { queue: QueuePort; wake: WakePort } {
         });
         notify = null;
       }
-      return q.splice(0);
+      const out = q.splice(0);
+      for (const m of out) inFlight.set(m.receipt, m);
+      return out;
     },
     async send(_to, msg) {
       q.push({ body: JSON.stringify(msg), receipt: `m${++n}` });
       notify?.();
     },
-    async delete() {},
+    async delete(receipt) {
+      inFlight.delete(receipt);
+    },
+    async release(receipt) {
+      const m = inFlight.get(receipt);
+      if (!m) return;
+      inFlight.delete(receipt);
+      q.push(m);
+      notify?.();
+    },
   };
   return { queue, wake: { wake: async () => ({ kind: "started" }) } };
 }
@@ -191,12 +214,15 @@ function runWorker(init: WorkerInit): void {
           await core.deleteMessage(m.receipt);
           out({ op: "done", id: m.id });
           break;
+        case "release":
+          await core.release(m.receipt);
+          out({ op: "done", id: m.id });
+          break;
         case "finalPoll":
           out({ op: "done", id: m.id, value: await core.finalPoll(m.graceMs) });
           break;
         case "stop":
-          await core.stop();
-          out({ op: "done", id: m.id });
+          out({ op: "done", id: m.id, value: await core.stop() });
           break;
       }
     } catch (e) {

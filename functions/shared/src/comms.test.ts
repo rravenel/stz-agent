@@ -116,3 +116,18 @@ test("acks queued back to back are all processed in one pass", async () => {
   assert.equal(doorman.unackedCount(), 0, "both acks processed in the same pass");
   assert.deepEqual(bus.pending("doorman"), []);
 });
+
+test("InMemoryComms: stop() counts undeleted messages; release() makes one visible again", async () => {
+  const bus = new InMemoryBus();
+  const doorman = bus.connect("doorman");
+  doorman.onMessage(() => {});
+  const p = bus.connect("prime");
+  const receipts: string[] = [];
+  p.onMessage((d) => receipts.push(d.receipt));
+  doorman.send("prime", "user.message", { text: "x" });
+  await new Promise((r) => setImmediate(r));
+  await p.release(receipts[0]!);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(receipts.length, 2, "redelivered");
+  assert.deepEqual(await p.stop(), { released: 1 });
+});

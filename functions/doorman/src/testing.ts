@@ -50,6 +50,10 @@ export class FakeQueue {
         return out.map(({ body, receipt }) => ({ body, receipt }));
       },
       send: async (to, msg) => this.push(to, JSON.stringify(msg)),
+      release: async (receipt) => {
+        const m = this.items(self).find((x) => x.receipt === receipt);
+        if (m) m.inFlight = false;
+      },
       delete: async (receipt) => {
         this.deleted.push(receipt);
         const a = this.items(self);

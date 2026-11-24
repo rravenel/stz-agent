@@ -19,6 +19,7 @@ function lastPollDelivers(w: () => World, text: string, msgId: string) {
     send: c.send.bind(c),
     onMessage: c.onMessage.bind(c),
     deleteMessage: c.deleteMessage.bind(c),
+    release: c.release.bind(c),
     unackedCount: c.unackedCount.bind(c),
     finalPoll: c.finalPoll.bind(c),
     stop: async () => {
@@ -103,7 +104,48 @@ function bind(c: Comms): Comms {
     onMessage: c.onMessage.bind(c),
     deleteMessage: c.deleteMessage.bind(c),
     unackedCount: c.unackedCount.bind(c),
+    release: c.release.bind(c),
     finalPoll: c.finalPoll.bind(c),
     stop: c.stop.bind(c),
   };
 }
+
+// ---- released on stop (#0033) ----------------------------------------------
+
+/** Comms whose first stop() reports an acked-but-undeleted message, without handing it over. */
+function releasesOnStop(c: Comms): Comms {
+  return { ...bind(c), stop: async () => { await c.stop(); return { released: 1 }; } };
+}
+
+test("stale wake: a released message gets a self-wake, after the log", async () => {
+  const wakes: string[] = [];
+  const w = new World({ wrapComms: releasesOnStop, deps: { selfWake: async (e) => { wakes.push(e.reason); } } });
+  assert.equal((await w.run("prewake")).exit, "stale_wake");
+  assert.deepEqual(wakes, ["continue"]);
+});
+
+test("exit_idle: a released message gets exactly one self-wake", async () => {
+  const wakes: string[] = [];
+  const w = new World({ wrapComms: releasesOnStop, deps: { selfWake: async (e) => { wakes.push(e.reason); } } });
+  w.say("hi", "u1");
+  assert.equal((await w.run()).exit, "idle");
+  assert.deepEqual(wakes, ["continue"]);
+});
+
+test("nothing released: no self-wake", async () => {
+  const wakes: string[] = [];
+  const w = new World({ deps: { selfWake: async (e) => { wakes.push(e.reason); } } });
+  w.say("hi", "u1");
+  assert.equal((await w.run()).exit, "idle");
+  assert.deepEqual(wakes, []);
+});
+
+test("a run that throws releases what it received, wakes once and keeps the original error", async () => {
+  const wakes: string[] = [];
+  const boom: ModelAdapter = { provider: adapter.provider, toRequest: () => { throw new Error("boom"); }, fromResponse: (b) => adapter.fromResponse(b) };
+  const w = new World({ deps: { adapter: boom, selfWake: async (e) => { wakes.push(e.reason); throw new Error("wake failed"); } } });
+  w.say("hi", "u1");
+  await assert.rejects(w.run(), /boom/);
+  assert.deepEqual(wakes, ["continue"]);
+  assert.equal(w.primeQueue().length, 1, "still queued for the next run");
+});

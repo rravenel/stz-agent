@@ -2,7 +2,7 @@
 // per-recipient unacked sets and the delivery monitor that sync-wakes a
 // recipient until its ack arrives. AWS lives behind QueuePort and WakePort.
 
-import type { Comms, Delivery } from "./comms.ts";
+import type { Comms, Delivery, StopResult } from "./comms.ts";
 import { makeAck, makeEnvelope, parseEnvelope, type BodyByType, type Endpoint, type Envelope, type MakeOptions, type MessageType } from "./envelope.ts";
 
 export interface QueuePort {
@@ -10,6 +10,8 @@ export interface QueuePort {
   receive(waitSeconds: number): Promise<{ body: string; receipt: string }[]>;
   send(to: Endpoint, msg: Envelope): Promise<void>;
   delete(receipt: string): Promise<void>;
+  /** Make a received message visible again at once. */
+  release(receipt: string): Promise<void>;
 }
 
 export type WakeKind = "running" | "started" | "failed" | "error";
@@ -26,7 +28,10 @@ export type LogEvent =
   | { kind: "poison"; error: string }
   | { kind: "send-failed"; to: Endpoint; msg_id: string; error: string }
   | { kind: "poll-failed"; error: string }
-  | { kind: "declined"; msg_id: string; reason: "deadline" };
+  | { kind: "declined"; msg_id: string; reason: "deadline" }
+  /** "stopping": never acked. "undeleted": acked, but the consumer never deleted it. */
+  | { kind: "released"; msg_id: string; reason: "stopping" | "undeleted" }
+  | { kind: "release-failed"; msg_id: string; error: string };
 export type Logger = (event: LogEvent) => void;
 
 export interface CommsOptions {
@@ -118,6 +123,10 @@ export class CommsCore implements Comms {
   private readonly monitor: DeliveryMonitor;
   private handler: ((d: Delivery) => void) | null = null;
   private held: Delivery[] = [];
+  /** Acked and not yet deleted: receipt → msg_id. */
+  private readonly undeleted = new Map<string, string>();
+  private readonly deletes = new Set<Promise<void>>();
+  private stopping: Promise<StopResult> | null = null;
   private readonly outbox: Envelope[] = [];
   private readonly waking = new Set<Endpoint>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -166,8 +175,30 @@ export class CommsCore implements Comms {
     for (const d of held) handler(d);
   }
 
-  deleteMessage(receipt: string): Promise<void> {
-    return this.queue.delete(receipt);
+  async deleteMessage(receipt: string): Promise<void> {
+    const msgId = this.undeleted.get(receipt);
+    this.undeleted.delete(receipt);
+    const p = this.queue.delete(receipt);
+    this.deletes.add(p);
+    try {
+      await p;
+    } catch (e) {
+      if (msgId !== undefined) this.undeleted.set(receipt, msgId); // still ours to release
+      throw e;
+    } finally {
+      this.deletes.delete(p);
+    }
+  }
+
+  async release(receipt: string): Promise<void> {
+    const msgId = this.undeleted.get(receipt);
+    this.undeleted.delete(receipt);
+    try {
+      await this.queue.release(receipt);
+    } catch (e) {
+      if (msgId !== undefined) this.undeleted.set(receipt, msgId);
+      throw e;
+    }
   }
 
   unackedCount(): number {
@@ -180,11 +211,35 @@ export class CommsCore implements Comms {
     return this.arrived === before;
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<StopResult> {
+    return (this.stopping ??= this.doStop());
+  }
+
+  private async doStop(): Promise<StopResult> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     await this.polling;
+    while (this.deletes.size) {
+      await Promise.allSettled([...this.deletes]);
+      await Promise.resolve(); // let deleteMessage settle its bookkeeping
+    }
+    this.held = [];
+    const left = [...this.undeleted];
+    this.undeleted.clear();
+    const done = await Promise.all(left.map(([receipt, msgId]) => this.tryRelease(receipt, msgId, "undeleted")));
+    return { released: done.filter(Boolean).length };
+  }
+
+  private async tryRelease(receipt: string, msgId: string, reason: "stopping" | "undeleted"): Promise<boolean> {
+    try {
+      await this.queue.release(receipt);
+      this.log({ kind: "released", msg_id: msgId, reason });
+      return true;
+    } catch (e) {
+      this.log({ kind: "release-failed", msg_id: msgId, error: String(e) });
+      return false;
+    }
   }
 
   /** One monitor tick: retry failed sends, then wake due recipients. */
@@ -241,6 +296,11 @@ export class CommsCore implements Comms {
       await this.queue.delete(receipt).catch(() => {});
       return;
     }
+    if (this.stopped) {
+      // No ack: the sender keeps responsibility and wakes us again (protocol §9B).
+      await this.tryRelease(receipt, msg.msg_id, "stopping");
+      return;
+    }
     const deadline = this.opts.acceptDeadlineAtMs;
     if (msg.type === "http.request" && deadline !== undefined && Date.now() + msg.body.timeout_s * 1000 > deadline) {
       this.log({ kind: "declined", msg_id: msg.msg_id, reason: "deadline" });
@@ -248,6 +308,8 @@ export class CommsCore implements Comms {
     }
     this.arrived++;
     await this.enqueue(makeAck(msg)); // ack first: "I'm awake and I have it"
+    this.undeleted.set(receipt, msg.msg_id);
+    if (this.stopped) return; // stop() began during the ack: stop() releases it
     const d = { msg, receipt };
     if (this.handler) this.handler(d);
     else this.held.push(d);

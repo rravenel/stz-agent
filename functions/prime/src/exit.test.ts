@@ -26,6 +26,7 @@ function recorder(ops: string[]) {
     send: c.send.bind(c),
     onMessage: c.onMessage.bind(c),
     deleteMessage: async (r) => { ops.push(`sqs-delete ${r}`); return c.deleteMessage(r); },
+    release: c.release.bind(c),
     unackedCount: c.unackedCount.bind(c),
     finalPoll: async (ms) => { onFinalPoll?.(); return c.finalPoll(ms); },
     stop: c.stop.bind(c),

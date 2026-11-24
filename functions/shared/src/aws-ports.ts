@@ -3,7 +3,7 @@
 // SqsQueuePort / LambdaWakePort wrap the SDK; classifyInvoke stays pure so it
 // is testable without AWS.
 
-import { DeleteMessageCommand, ReceiveMessageCommand, SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
+import { ChangeMessageVisibilityCommand, DeleteMessageCommand, ReceiveMessageCommand, SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import type { QueuePort, WakePort, WakeResult } from "./comms-core.ts";
 import type { Endpoint, Envelope } from "./envelope.ts";
@@ -31,6 +31,12 @@ export class SqsQueuePort implements QueuePort {
 
   async delete(receipt: string): Promise<void> {
     await this.client.send(new DeleteMessageCommand({ QueueUrl: this.urls[this.self], ReceiptHandle: receipt }));
+  }
+
+  async release(receipt: string): Promise<void> {
+    await this.client.send(
+      new ChangeMessageVisibilityCommand({ QueueUrl: this.urls[this.self], ReceiptHandle: receipt, VisibilityTimeout: 0 }),
+    );
   }
 }
 

@@ -40,6 +40,7 @@ function faultyWorld(extra: { now?: () => Date } = {}) {
     send: c.send.bind(c),
     onMessage: c.onMessage.bind(c),
     deleteMessage: async (r: string) => { ops.push(`sqs-delete ${r}`); return c.deleteMessage(r); },
+    release: c.release.bind(c),
     unackedCount: c.unackedCount.bind(c),
     finalPoll: c.finalPoll.bind(c),
     stop: c.stop.bind(c),

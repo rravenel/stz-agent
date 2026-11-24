@@ -10,6 +10,10 @@ export interface Delivery {
   receipt: string;
 }
 
+export interface StopResult {
+  released: number;
+}
+
 export interface Comms {
   /** Who this worker serves. */
   readonly self: Endpoint;
@@ -33,8 +37,15 @@ export interface Comms {
    * the queue stayed empty. Anything that arrives goes to the handler.
    */
   finalPoll(graceMs: number): Promise<boolean>;
-  /** Stop polling and the delivery monitor. */
-  stop(): Promise<void>;
+  /** Hand a received message back: it becomes visible in the queue again. */
+  release(receipt: string): Promise<void>;
+  /**
+   * Stop polling and the delivery monitor. A message that arrives from now on
+   * is neither acked nor handed over. Messages already acked but never deleted
+   * are released; `released` counts them. Their senders won't wake this
+   * function again, so a consumer that gets a non-zero count must.
+   */
+  stop(): Promise<StopResult>;
 }
 
 interface Queued {
@@ -83,6 +94,14 @@ export class InMemoryBus {
     if (i >= 0) q.splice(i, 1);
   }
 
+  /** @internal */
+  release(endpoint: Endpoint, receipt: string): void {
+    const item = this.queue(endpoint).find((x) => x.receipt === receipt);
+    if (!item) return;
+    item.inFlight = false;
+    queueMicrotask(() => this.kick(endpoint));
+  }
+
   /** @internal Deliver visible messages to a live consumer, in order. */
   kick(endpoint: Endpoint): void {
     const c = this.live.get(endpoint);
@@ -99,9 +118,14 @@ export class InMemoryBus {
   }
 
   /** @internal */
-  unlink(c: InMemoryComms): void {
+  unlink(c: InMemoryComms): number {
     if (this.live.get(c.self) === c) this.live.delete(c.self);
-    for (const q of this.queue(c.self)) q.inFlight = false;
+    let released = 0;
+    for (const q of this.queue(c.self)) {
+      if (q.inFlight) released++;
+      q.inFlight = false;
+    }
+    return released;
   }
 
   private queue(e: Endpoint): Queued[] {
@@ -152,15 +176,19 @@ export class InMemoryComms implements Comms {
     return this.arrived === before;
   }
 
-  async stop(): Promise<void> {
-    this.stopNow();
+  async release(receipt: string): Promise<void> {
+    this.bus.release(this.self, receipt);
+  }
+
+  async stop(): Promise<StopResult> {
+    return { released: this.stopNow() };
   }
 
   /** @internal */
-  stopNow(): void {
-    if (this.stopped) return;
+  stopNow(): number {
+    if (this.stopped) return 0;
     this.stopped = true;
-    this.bus.unlink(this);
+    return this.bus.unlink(this);
   }
 
   /** @internal */

@@ -23,9 +23,12 @@ test("SqsQueuePort: receive/send/delete hit the right queues", async () => {
   const msg = makeEnvelope("user.message", "com", "prime", { text: "hi" }) as Envelope;
   await q.send("prime", msg);
   await q.delete("r1");
+  await q.release("r1");
   assert.deepEqual(calls[0]!.input, { QueueUrl: "q/c", WaitTimeSeconds: 5, MaxNumberOfMessages: 10 });
   assert.deepEqual(calls[1]!.input, { QueueUrl: "q/p", MessageBody: JSON.stringify(msg) });
   assert.deepEqual(calls[2]!.input, { QueueUrl: "q/c", ReceiptHandle: "r1" });
+  assert.equal(calls[3]!.name, "ChangeMessageVisibilityCommand");
+  assert.deepEqual(calls[3]!.input, { QueueUrl: "q/c", ReceiptHandle: "r1", VisibilityTimeout: 0 });
 });
 
 test("LambdaWakePort: sync Invoke with abort signal, outcomes classified", async () => {

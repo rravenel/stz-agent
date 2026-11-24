@@ -3,7 +3,7 @@
 // comms worker, S3, the self-invoke) happens in #0008.
 
 import { randomUUID } from "node:crypto";
-import type { Comms, Delivery } from "../../shared/src/comms.ts";
+import type { Comms, Delivery, StopResult } from "../../shared/src/comms.ts";
 import { markSeen } from "../../shared/src/state.ts";
 import { loadCheckpoint, peekState, saveCheckpoint } from "./checkpoint.ts";
 import { LogWriter } from "./log.ts";
@@ -69,6 +69,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 class RunComms implements Comms {
   private cur: Comms;
   private stopped = false;
+  private last: StopResult = { released: 0 };
   private handler: ((d: Delivery) => void) | null = null;
   private readonly make: () => Comms;
 
@@ -94,10 +95,17 @@ class RunComms implements Comms {
   finalPoll(graceMs: number): Promise<boolean> {
     return this.cur.finalPoll(graceMs);
   }
-  async stop(): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
-    await this.cur.stop();
+  release(receipt: string): Promise<void> {
+    return this.cur.release(receipt);
+  }
+  /** Idempotent: repeated calls report the same result until restart(). */
+  async stop(): Promise<StopResult> {
+    if (!this.stopped) {
+      this.stopped = true;
+      this.last = { released: 0 };
+      this.last = await this.cur.stop();
+    }
+    return this.last;
   }
   restart(): void {
     if (!this.stopped) return;
@@ -126,6 +134,17 @@ export function createHandler(deps: PrimeDeps) {
     const comms = new RunComms(deps.comms);
     const inbox: Delivery[] = [];
     comms.onMessage((d) => inbox.push(d));
+    /** Set once this run has sent its self-wake, so it never sends two. */
+    let woke = false;
+    const selfWake = async () => {
+      if (!deps.selfWake) throw new Error("messages or work left for a next run but no selfWake is configured");
+      woke = true;
+      await deps.selfWake({ reason: "continue" });
+    };
+    /** Released messages were acked, so nobody else will wake Prime for them (#0029). */
+    const wakeIfReleased = async () => {
+      if (!woke && (await comms.stop()).released > 0) await selfWake();
+    };
 
     try {
       // 3. Stale-wake check: no message, and not a continuation (a prewake
@@ -141,6 +160,7 @@ export function createHandler(deps: PrimeDeps) {
           const peek = await peekState(deps.store);
           const log = new LogWriter(deps.store, run, peek, now);
           await log.lifecycle("stale_wake", { reason: event.reason ?? null, waited_ms: staleWakeMs });
+          await wakeIfReleased();
           return { run, exit: "stale_wake", restored: false, processed: 0, duplicates: 0, checkpoint: peek.n };
         }
       }
@@ -237,8 +257,7 @@ export function createHandler(deps: PrimeDeps) {
           if (!(await exitNow())) continue;
           // Continuation (spec §5.5): the self-wake is the very last action.
           await log.lifecycle("exit_deadline", { elapsed_ms: elapsed(), runnable: harness.runnable() });
-          if (!deps.selfWake) throw new Error("run deadline reached but no selfWake is configured");
-          await deps.selfWake({ reason: "continue" });
+          await selfWake();
           return { run, exit: "deadline", restored, processed, duplicates, checkpoint: state.n };
         }
         // Step 6: final poll. A message goes back to step 1.
@@ -246,9 +265,15 @@ export function createHandler(deps: PrimeDeps) {
         if (empty && inbox.length === 0) {
           if (!(await exitNow())) continue;
           await log.lifecycle("exit_idle", { open_tool_calls: state.open_tool_calls.length, pending_requests: Object.keys(state.pending_requests).length });
+          await wakeIfReleased();
           return { run, exit: "idle", restored, processed, duplicates, checkpoint: state.n };
         }
       }
+    } catch (e) {
+      // The crash path: stop() makes what this run received visible again. The
+      // queue's maxReceiveCount bounds the retries. Never mask the real error.
+      await wakeIfReleased().catch((e2: unknown) => console.error(JSON.stringify({ kind: "wake-failed", error: String(e2) })));
+      throw e;
     } finally {
       await comms.stop();
     }

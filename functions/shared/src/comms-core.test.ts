@@ -52,6 +52,10 @@ class FakeQueue {
         return out.map(({ body, receipt }) => ({ body, receipt }));
       },
       send: async (to, msg) => this.push(to, JSON.stringify(msg)),
+      release: async (receipt) => {
+        const m = this.items(self).find((x) => x.receipt === receipt);
+        if (m) m.inFlight = false;
+      },
       delete: async (receipt) => {
         const a = this.items(self);
         const i = a.findIndex((x) => x.receipt === receipt);
@@ -383,4 +387,108 @@ test("classifyInvoke: abort → started, 429 → running, FunctionError → fail
   assert.equal(classifyInvoke({ ok: true, StatusCode: 200, FunctionError: "Unhandled" }).kind, "failed");
   assert.equal(classifyInvoke({ ok: true, StatusCode: 200 }).kind, "started");
   assert.equal(classifyInvoke({ ok: false, error: Object.assign(new Error("x"), { name: "ResourceNotFoundException" }) }).kind, "error");
+});
+
+// ---- stop() (#0033) ------------------------------------------------------
+
+const userMsg = (text = "x") => makeEnvelope("user.message", "doorman", "prime", { text }) as Envelope;
+
+test("stop: a message from the in-flight poll is not acked, not delivered, and visible to the next consumer", async () => {
+  const fq = new FakeQueue();
+  const log: LogEvent[] = [];
+  const got: Delivery[] = [];
+  const wake = new FakeWake();
+  const doorman = core("doorman", fq, wake);
+  doorman.onMessage(() => {});
+  const p1 = core("prime", fq, new FakeWake(), log);
+  p1.onMessage((d) => got.push(d));
+  await flush();
+  const stopping = p1.stop();
+  const sent = doorman.send("prime", "user.message", { text: "late" });
+  await flush();
+  await flush();
+  assert.deepEqual(await stopping, { released: 0 }, "never acked, so its sender still wakes us");
+  assert.equal(got.length, 0);
+  assert.equal(fq.pending("doorman").length, 0, "no ack");
+  assert.equal(fq.items("prime")[0]!.inFlight, false);
+  assert.deepEqual(log, [{ kind: "released", msg_id: sent.msg_id, reason: "stopping" }]);
+  await advance(3600);
+  assert.equal(doorman.unackedCount(), 1);
+  assert.equal(wake.calls.length, 1, "the sender's monitor wakes again");
+  const got2: Delivery[] = [];
+  core("prime", fq, new FakeWake()).onMessage((d) => got2.push(d));
+  await advance(300);
+  assert.deepEqual(got2.map((d) => d.msg.msg_id), [sent.msg_id]);
+});
+
+test("stop: releases delivered-but-undeleted messages only, and is idempotent", async () => {
+  const fq = new FakeQueue();
+  const got: Delivery[] = [];
+  const p = core("prime", fq, new FakeWake());
+  p.onMessage((d) => got.push(d));
+  fq.push("prime", JSON.stringify(userMsg("a")));
+  fq.push("prime", JSON.stringify(userMsg("b")));
+  await advance(300);
+  assert.equal(got.length, 2);
+  void p.deleteMessage(got[0]!.receipt); // not awaited: stop() waits for it
+  const s = p.stop();
+  await advance(2500);
+  assert.deepEqual(await s, { released: 1 });
+  assert.deepEqual(await p.stop(), { released: 1 });
+  assert.deepEqual(fq.pending("prime").map((m) => m.msg_id), [got[1]!.msg.msg_id]);
+  assert.equal(fq.items("prime")[0]!.inFlight, false);
+});
+
+test("stop: a message held for a missing handler is released too", async () => {
+  const fq = new FakeQueue();
+  const p = core("prime", fq, new FakeWake());
+  fq.push("prime", JSON.stringify(userMsg()));
+  await advance(300);
+  const s = p.stop();
+  await advance(2500);
+  assert.deepEqual(await s, { released: 1 });
+});
+
+test("stop: beginning during the ack releases and counts, without delivering", async () => {
+  const fq = new FakeQueue();
+  const got: Delivery[] = [];
+  const port = fq.port("prime");
+  let letAck!: () => void;
+  const gate = new Promise<void>((r) => (letAck = r));
+  const p = new CommsCore("prime", { ...port, send: async (to, m) => { await gate; return port.send(to, m); } }, new FakeWake()).start();
+  cores.push(p);
+  p.onMessage((d) => got.push(d));
+  fq.push("prime", JSON.stringify(userMsg()));
+  await flush();
+  await flush();
+  const s = p.stop();
+  letAck();
+  assert.deepEqual(await s, { released: 1 });
+  assert.equal(got.length, 0);
+});
+
+test("stop: acks from the last poll still clear entries", async () => {
+  const fq = new FakeQueue();
+  const p = core("prime", fq, new FakeWake());
+  p.onMessage(() => {});
+  const sent = p.send("com", "http.request", httpReq(30).body as never);
+  await flush();
+  const s = p.stop();
+  fq.push("prime", JSON.stringify(makeEnvelope("ack", "com", "prime", { acked_msg_id: sent.msg_id })));
+  await s;
+  assert.equal(p.unackedCount(), 0);
+});
+
+test("stop: a failed release is logged and not counted", async () => {
+  const fq = new FakeQueue();
+  const log: LogEvent[] = [];
+  const p = new CommsCore("prime", { ...fq.port("prime"), release: async () => { throw new Error("gone"); } }, new FakeWake(), (e) => log.push(e)).start();
+  cores.push(p);
+  p.onMessage(() => {});
+  fq.push("prime", JSON.stringify(userMsg()));
+  await advance(300);
+  const s = p.stop();
+  await advance(2500);
+  assert.deepEqual(await s, { released: 0 });
+  assert.ok(log.some((e) => e.kind === "release-failed"));
 });
