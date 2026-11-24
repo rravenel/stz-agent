@@ -1,4 +1,6 @@
 import json
+import re
+from fnmatch import fnmatchcase
 
 import aws_cdk as core
 import aws_cdk.assertions as assertions
@@ -192,13 +194,57 @@ def test_only_com_reads_secret(template):
     assert {"Ref": role_ref} in holders[0]["Properties"]["Roles"]
 
 
-def test_queue_permissions(template):
-    def actions(key):
-        return {a for s in role_statements(template, key) for a in as_list(s["Action"])}
+QUEUE_CONSTRUCTS = {"doorman": "DoormanMessages", "prime": "PrimeMessages", "com": "ComMessages"}
+CONSUME_ACTIONS = ("sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility")
+SENDS = {"doorman": {"prime"}, "prime": {"doorman", "com"}, "com": {"prime"}}
 
+
+def queue_ids(template):
+    """Function key -> logical ID of its main queue (never a DLQ)."""
+    queues = template.find_resources("AWS::SQS::Queue")
+    out = {}
+    for key, construct in QUEUE_CONSTRUCTS.items():
+        path = f"{STACK}/{construct}/Resource"
+        found = [i for i, q in queues.items() if q.get("Metadata", {}).get("aws:cdk:path") == path]
+        if not found:  # no path metadata: CDK logical IDs are the construct id + 8 hex digits
+            found = [i for i in queues if re.fullmatch(construct + r"[0-9A-F]{8}", i)]
+        assert len(found) == 1, f"{construct}: {found}"
+        out[key] = found[0]
+    return out
+
+
+def sqs_targets(template, key, action):
+    """Queues on which the function's role is granted `action`.
+
+    A resource that isn't a main queue (a DLQ, a wildcard) is returned as raw
+    JSON, so it can never match an expected set. Wildcard actions count too.
+    """
+    by_id = {i: k for k, i in queue_ids(template).items()}
+    out = set()
+    for s in role_statements(template, key):
+        if s["Effect"] != "Allow":
+            continue
+        # IAM action names are case-insensitive.
+        if not any(fnmatchcase(action.lower(), a.lower()) for a in as_list(s["Action"])):
+            continue
+        for r in as_list(s["Resource"]):
+            arn = r.get("Fn::GetAtt") if isinstance(r, dict) else None
+            known = arn and arn[1] == "Arn" and arn[0] in by_id
+            out.add(by_id[arn[0]] if known else json.dumps(r))
+    return out
+
+
+def test_queue_ids_skip_dlqs(template):
+    ids = queue_ids(template)
+    assert len(set(ids.values())) == 3
+    assert not any("Dlq" in i for i in ids.values())
+
+
+def test_queue_permissions(template):
     for key in NAMES:
-        acts = actions(key)
-        assert "sqs:ReceiveMessage" in acts and "sqs:SendMessage" in acts, key
+        for action in CONSUME_ACTIONS:
+            assert sqs_targets(template, key, action) == {key}, (key, action)
+        assert sqs_targets(template, key, "sqs:SendMessage") == SENDS[key], key
 
 
 # --- API & outputs ------------------------------------------------------
@@ -311,6 +357,19 @@ def test_spike_s2_bucket_scoped(spike_template):
                 if any(a.startswith("s3:") for a in as_list(s["Action"])):
                     s3_res += [json.dumps(r) for r in as_list(s["Resource"])]
     assert any("spikes/s2/*" in r for r in s3_res)
+
+
+def test_spike_s2_has_no_sqs(spike_template):
+    for key in S2:
+        _, fn = s2_fn(spike_template, key)
+        role_ref = fn["Properties"]["Role"]["Fn::GetAtt"][0]
+        actions = []
+        for pol in spike_template.find_resources("AWS::IAM::Policy").values():
+            if {"Ref": role_ref} in pol["Properties"]["Roles"]:
+                for s in pol["Properties"]["PolicyDocument"]["Statement"]:
+                    actions += as_list(s["Action"])
+        assert actions, key
+        assert not [a for a in actions if a == "*" or a.lower().startswith("sqs:")], key
 
 
 def test_spike_s2_keeps_core_tests(spike_template):
