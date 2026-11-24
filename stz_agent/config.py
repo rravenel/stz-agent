@@ -1,6 +1,6 @@
 """App-level configuration helpers (kept out of app.py so tests can import them)."""
 
-MODEL_PROVIDERS = ("mock", "anthropic", "openai")
+MODEL_PROVIDERS = ("mock", "anthropic", "openai", "bedrock")
 
 
 def validate_model_provider(provider: str) -> str:

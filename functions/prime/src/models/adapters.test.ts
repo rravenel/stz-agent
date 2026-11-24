@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { anthropicAdapter, ANTHROPIC_URL } from "./anthropic.ts";
+import { bedrockAdapter } from "./bedrock.ts";
 import { openaiAdapter } from "./openai.ts";
 import { adapterFromEnv, MOCK_URL } from "./config.ts";
 import { ModelResponseError, type Message, type ModelRequest } from "./turn.ts";
@@ -128,7 +129,9 @@ test("adapterFromEnv picks the provider and refuses bad config", () => {
   assert.equal(adapterFromEnv({ MODEL_PROVIDER: "openai", MODEL_NAME: "m", OPENAI_BASE_URL: "https://api.openai.com/v1" }).provider, "openai");
   assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "anthropic" }), /MODEL_NAME/);
   assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "openai", MODEL_NAME: "m" }), /OPENAI_BASE_URL/);
-  assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m" }), /not implemented/);
+  assert.throws(() => adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m" }), /AWS_REGION/);
+  assert.match(adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m", AWS_REGION: "us-west-2" }).toRequest(req).url, /us-west-2/);
+  assert.match(adapterFromEnv({ MODEL_PROVIDER: "bedrock", MODEL_NAME: "m", AWS_REGION: "us-west-2", BEDROCK_REGION: "us-east-1" }).toRequest(req).url, /us-east-1/);
   assert.throws(() => adapterFromEnv({}), /MODEL_PROVIDER/);
 });
 
@@ -168,4 +171,61 @@ test("the repl tool description matches how evals run (return, globalThis, no la
   assert.match(d, /globalThis/);
   assert.doesNotMatch(d, /last expression/);
   assert.doesNotMatch(JSON.stringify(body.tools[0].input_schema), /last expression/);
+});
+
+// --- Bedrock (#0021) --------------------------------------------------------
+
+const bedrock = bedrockAdapter({ model: "us.vendor.model-v1:0", region: "us-west-2" });
+
+test("bedrock request: Converse URL, auth mode, no keys, tool round trip", () => {
+  const r = bedrock.toRequest(req);
+  assert.equal(r.url, "https://bedrock-runtime.us-west-2.amazonaws.com/model/us.vendor.model-v1%3A0/converse");
+  assert.equal(r.auth, "bedrock");
+  assert.deepEqual(r.headers, { "content-type": "application/json" });
+  const b = JSON.parse(r.body);
+  assert.deepEqual(b.system, [{ text: "You are terse." }]);
+  assert.deepEqual(b.inferenceConfig, { maxTokens: 1024 });
+  assert.equal(b.toolConfig.tools[0].toolSpec.name, "repl");
+  assert.deepEqual(b.toolConfig.tools[0].toolSpec.inputSchema.json.required, ["code"]);
+  assert.deepEqual(b.messages[1].content[1], { toolUse: { toolUseId: "call_1", name: "repl", input: { code: "6*7" } } });
+  assert.deepEqual(b.messages[2], { role: "user", content: [{ toolResult: { toolUseId: "call_1", content: [{ text: '{"value":42}' }] } }] });
+});
+
+test("bedrock request: merges same-role messages, drops blank text, marks errors", () => {
+  const b = JSON.parse(
+    bedrock.toRequest({
+      max_tokens: 1,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "a" }] },
+        { role: "user", content: [{ type: "text", text: "b" }] },
+        { role: "assistant", content: [{ type: "text", text: " " }] },
+        { role: "user", content: [{ type: "tool_result", tool_call_id: "t", content: "", is_error: true }] },
+      ],
+    }).body,
+  );
+  assert.deepEqual(b.messages, [
+    { role: "user", content: [{ text: "a" }, { text: "b" }, { toolResult: { toolUseId: "t", content: [{ text: "(empty)" }], status: "error" } }] },
+  ]);
+  assert.ok(!("system" in b));
+});
+
+test("bedrock response: text, toolUse, usage and stop map; other blocks skipped", () => {
+  const reply = bedrock.fromResponse(
+    JSON.stringify({
+      output: { message: { role: "assistant", content: [{ reasoningContent: {} }, { text: "Hi" }, { toolUse: { toolUseId: "t1", name: "repl", input: { code: "1" } } }] } },
+      stopReason: "tool_use",
+      usage: { inputTokens: 5, outputTokens: 7, totalTokens: 12 },
+    }),
+  );
+  assert.deepEqual(reply, {
+    content: [{ type: "text", text: "Hi" }, { type: "tool_call", id: "t1", name: "repl", input: { code: "1" } }],
+    stop: "tool_use",
+    usage: { input_tokens: 5, output_tokens: 7 },
+  });
+});
+
+test("bedrock response: errors raised", () => {
+  assert.throws(() => bedrock.fromResponse('{"message":"Access denied"}'), /bedrock: Access denied/);
+  assert.throws(() => bedrock.fromResponse("{}"), ModelResponseError);
+  assert.throws(() => bedrock.fromResponse("nope"), ModelResponseError);
 });

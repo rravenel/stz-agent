@@ -2,12 +2,14 @@
 // not per turn). Prime holds no API keys: Com adds auth per the request's
 // auth mode.
 //
-//   MODEL_PROVIDER  anthropic | openai | mock   (bedrock: not yet, see issues)
+//   MODEL_PROVIDER  anthropic | openai | bedrock | mock
 //   MODEL_NAME      provider's model id (mock: any label)
+//   BEDROCK_REGION  for bedrock; defaults to AWS_REGION (set by Lambda)
 //   OPENAI_BASE_URL required for openai, e.g. https://api.openai.com/v1
 //   OPENAI_MAX_TOKENS_FIELD  max_tokens (default) | max_completion_tokens
 
 import { anthropicAdapter } from "./anthropic.ts";
+import { bedrockAdapter } from "./bedrock.ts";
 import { openaiAdapter } from "./openai.ts";
 import type { ModelAdapter } from "./turn.ts";
 
@@ -18,7 +20,7 @@ export function adapterFromEnv(env: Record<string, string | undefined> = process
   const model = (env["MODEL_NAME"] ?? "").trim();
   if (provider === "mock") return anthropicAdapter({ model: model || "mock", url: MOCK_URL, auth: "mock" });
   if (!["anthropic", "openai", "bedrock"].includes(provider)) {
-    throw new Error(`MODEL_PROVIDER must be anthropic, openai or mock, got ${JSON.stringify(provider)}`);
+    throw new Error(`MODEL_PROVIDER must be anthropic, openai, bedrock or mock, got ${JSON.stringify(provider)}`);
   }
   if (!model) throw new Error("MODEL_NAME is required");
   switch (provider) {
@@ -33,9 +35,12 @@ export function adapterFromEnv(env: Record<string, string | undefined> = process
       }
       return openaiAdapter({ model, baseUrl, maxTokensField: field });
     }
-    case "bedrock":
-      throw new Error("MODEL_PROVIDER=bedrock is not implemented yet (#0021)");
+    case "bedrock": {
+      const region = (env["BEDROCK_REGION"] ?? env["AWS_REGION"] ?? "").trim();
+      if (!/^[a-z0-9-]+$/.test(region)) throw new Error("BEDROCK_REGION or AWS_REGION is required for MODEL_PROVIDER=bedrock");
+      return bedrockAdapter({ model, region });
+    }
     default:
-      throw new Error(`MODEL_PROVIDER must be anthropic, openai or mock, got ${JSON.stringify(provider)}`);
+      throw new Error(`MODEL_PROVIDER must be anthropic, openai, bedrock or mock, got ${JSON.stringify(provider)}`);
   }
 }
